@@ -720,6 +720,8 @@ static void LocalPlayer_SetLocation(struct Entity* e, struct LocationUpdate* upd
 	LocalInterpComp_SetLocation(&p->Interp, update, e);
 }
 
+static void LocalPlayer_DoRespawn(struct LocalPlayer* p);
+
 static void LocalPlayer_Tick(struct Entity* e, float delta) {
 	struct LocalPlayer* p = (struct LocalPlayer*)e;
 	struct HacksComp* hacks = &p->Hacks;
@@ -745,6 +747,17 @@ static void LocalPlayer_Tick(struct Entity* e, float delta) {
 	PhysicsComp_UpdateVelocityState(&p->Physics);
 	headingVelocity = Vec3_RotateY3(xMoving, 0, zMoving, e->Yaw * MATH_DEG2RAD);
 	PhysicsComp_PhysicsTick(&p->Physics, headingVelocity);
+
+#ifdef CC_BUILD_ESP32S3
+	/* Allow a short visible fall before returning the player to spawn. The
+	 * horizontal guard also catches flying/noclip players that leave the map. */
+	if (e->Position.y < -16.0f ||
+		e->Position.x < -16.0f || e->Position.x > World.Width  + 16.0f ||
+		e->Position.z < -16.0f || e->Position.z > World.Length + 16.0f) {
+		LocalPlayer_DoRespawn(p);
+		return;
+	}
+#endif
 
 	/* Fixes high jump, when holding down a movement key, jump, fly, then let go of fly key */
 	if (p->Hacks.Floating) e->Velocity.y = 0.0f;

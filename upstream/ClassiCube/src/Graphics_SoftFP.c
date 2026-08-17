@@ -354,13 +354,11 @@ void Gfx_Create(void) {
     Gfx.Limitations  = GFX_LIMIT_MINIMAL;
 #if defined CC_BUILD_ESP32S3 && defined CC_BUILD_SOFTFP_W_DEPTH8
     /* Claim the fixed-resolution Z8 block before component VBs can fragment
-     * the internal heap. Never move depth to PSRAM or silently lower quality. */
+     * the internal heap. Keep the same raster resolution on fallback. */
     raster_width  = CLASSICUBE_3D_WIDTH;
     raster_height = CLASSICUBE_3D_HEIGHT;
     if (!holo_port_buffer(raster_width * raster_height * sizeof(DepthValue), 2)) {
-        Platform_LogConst("[cc.gfx] ERROR: 192x144 Z8 internal depth reserve failed (27648 bytes)");
-        Process_Abort2(ERR_OUT_OF_MEMORY, "allocating fixed 192x144 internal depth buffer");
-        return;
+        Platform_LogConst("[cc.gfx] WARN: 192x144 Z8 internal reserve unavailable; using PSRAM at same resolution");
     }
 #endif
 #ifdef CC_BUILD_SOFTFP_TERRAIN_TILE_CACHE
@@ -1303,8 +1301,8 @@ static cc_bool ViewportVertex3D(VertexFixed* vertex) {
     int64_t z_ndc = ((int64_t)vertex->z * invW) >> FP_SHIFT;
     
 #ifdef CC_BUILD_SOFTFP_LOWRES_RASTER
-    /* Rasterise only the 3D scene at the selected 4:3 resolution. Each sample
-     * is expanded through the precomputed map; 2D/UI stays native 320x240. */
+    /* Rasterise only the 3D scene at 192x144 and expand its samples through
+     * the precomputed map. Keep 2D/UI native at 320x240. */
     int64_t screen_x = vp_raster_hwidth_fp  + ((x_ndc * vp_raster_hwidth_fp)  >> FP_SHIFT);
     int64_t screen_y = vp_raster_hheight_fp - ((y_ndc * vp_raster_hheight_fp) >> FP_SHIFT);
 #else
@@ -1430,10 +1428,29 @@ static void DrawSprite2D(VertexFixed* V0, VertexFixed* V1, VertexFixed* V2) {
 #endif
 #define SOFTFP_RASTER_FP_ONE (1 << SOFTFP_RASTER_FP_SHIFT)
 
+/* Fixed-point clipping can leave adjacent polygons a tiny fraction of a
+ * raster pixel apart even when their original world-space edge was shared.
+ * Thirty-two barycentric LSBs conservatively cover only those borderline
+ * samples (less than 0.1 pixel at this viewport) without visibly growing
+ * silhouettes or adding a per-pixel cost. */
+#ifdef CC_BUILD_ESP32S3
+#define SOFTFP_COVERAGE_GUARD 32
+#else
+#define SOFTFP_COVERAGE_GUARD 0
+#endif
+
 static CC_INLINE int SoftFP_RasterEdge(int ax, int ay, int bx, int by,
                                        int cx, int cy) {
-    return (int)((((int64_t)bx - ax) * ((int64_t)cy - ay) >> SOFTFP_RASTER_FP_SHIFT) -
-                 (((int64_t)by - ay) * ((int64_t)cx - ax) >> SOFTFP_RASTER_FP_SHIFT));
+    int64_t cross = ((int64_t)bx - ax) * ((int64_t)cy - ay) -
+                    ((int64_t)by - ay) * ((int64_t)cx - ax);
+
+    /* Quantise the complete cross product, not its two products separately.
+     * Separate arithmetic shifts can round both directions of a shared edge
+     * outwards by one unit, so neither adjacent triangle owns the pixel and
+     * the clear colour leaks through as a dotted seam.  A single floor shift
+     * keeps pixel-step increments exact and makes reversed shared edges
+     * complementary (their quantised values sum to either 0 or -1). */
+    return (int)(cross >> SOFTFP_RASTER_FP_SHIFT);
 }
 
 
@@ -1853,9 +1870,12 @@ static CC_NOINLINE void DrawTriangleFastTerrain(VertexFixed* V0, VertexFixed* V1
         cc_bool perspectiveValid = false;
         DepthValue* fastDepth;
 
-        if (!ClipSpanEdge(rowIc0, step_ic0_per_x, &spanLower, &spanUpper) ||
-            !ClipSpanEdge(rowIc1, step_ic1_per_x, &spanLower, &spanUpper) ||
-            !ClipSpanEdge(rowIc2, step_ic2_per_x, &spanLower, &spanUpper)) continue;
+        if (!ClipSpanEdge(rowIc0 + SOFTFP_COVERAGE_GUARD,
+                          step_ic0_per_x, &spanLower, &spanUpper) ||
+            !ClipSpanEdge(rowIc1 + SOFTFP_COVERAGE_GUARD,
+                          step_ic1_per_x, &spanLower, &spanUpper) ||
+            !ClipSpanEdge(rowIc2 + SOFTFP_COVERAGE_GUARD,
+                          step_ic2_per_x, &spanLower, &spanUpper)) continue;
 
         spanMinX = minX + spanLower;
         spanMaxX = minX + spanUpper;
@@ -2394,9 +2414,12 @@ static void DrawTriangle3DGeneric(VertexFixed* V0, VertexFixed* V1,
 #endif
 #endif
 
-        if (!ClipSpanEdge(rowIc0, step_ic0_per_x, &spanLower, &spanUpper) ||
-            !ClipSpanEdge(rowIc1, step_ic1_per_x, &spanLower, &spanUpper) ||
-            !ClipSpanEdge(rowIc2, step_ic2_per_x, &spanLower, &spanUpper)) continue;
+        if (!ClipSpanEdge(rowIc0 + SOFTFP_COVERAGE_GUARD,
+                          step_ic0_per_x, &spanLower, &spanUpper) ||
+            !ClipSpanEdge(rowIc1 + SOFTFP_COVERAGE_GUARD,
+                          step_ic1_per_x, &spanLower, &spanUpper) ||
+            !ClipSpanEdge(rowIc2 + SOFTFP_COVERAGE_GUARD,
+                          step_ic2_per_x, &spanLower, &spanUpper)) continue;
 
         spanMinX   = minX + spanLower;
         spanMaxX   = minX + spanUpper;
@@ -3364,12 +3387,9 @@ void Gfx_OnWindowResize(int width, int height) {
     depthBufferInternal = depthBuffer != NULL;
     if (!depthBuffer) {
 #ifdef CC_BUILD_ESP32S3
-        Platform_LogConst("[cc.gfx] ERROR: internal depth buffer unavailable; PSRAM depth disabled");
-        Process_Abort2(ERR_OUT_OF_MEMORY, "allocating internal 3D depth buffer");
-        return;
-#else
-        depthBuffer = Mem_Alloc(db_stride * db_height, sizeof(DepthValue), "depth buffer");
+        Platform_LogConst("[cc.gfx] depth internal unavailable; allocating 192x144 Z8 in PSRAM");
 #endif
+        depthBuffer = Mem_Alloc(db_stride * db_height, sizeof(DepthValue), "depth buffer");
     }
     Mem_Set(depthBuffer, DEPTH_CLEAR_VALUE, db_stride * db_height);
     asyncPresenterClear = holo_port_presenter_async_available();
@@ -3406,7 +3426,11 @@ void Gfx_OnWindowResize(int width, int height) {
     Platform_LogConst("[cc.gfx] texture=affine A1RGB555 framebuffer=RGB565 alpha=fixed50 extras=off");
 #endif
 #elif defined CC_BUILD_SOFTFP_W_DEPTH8
-    Platform_LogConst("[cc.gfx] depth=reciprocal-W Z8 hybrid-linear-log internal=27648 fixed");
+    if (depthBufferInternal) {
+        Platform_LogConst("[cc.gfx] depth=reciprocal-W Z8 hybrid-linear-log internal=27648");
+    } else {
+        Platform_LogConst("[cc.gfx] depth=reciprocal-W Z8 PSRAM fallback");
+    }
 #ifdef CC_BUILD_SOFTFP_PERSPECTIVE4
     Platform_LogConst("[cc.gfx] texture=perspective-correct adaptive/4/8/16 A1RGB555 framebuffer=RGB565 alpha=fixed50 extras=off");
 #else
@@ -3441,7 +3465,7 @@ void Gfx_OnWindowResize(int width, int height) {
 #endif
 #ifdef CC_BUILD_SOFTFP_LOWRES_RASTER
 #ifdef CC_BUILD_SOFTFP_W_DEPTH8
-    Platform_LogConst("[cc.gfx] raster=3D-192x144 Z8 scale5/3 UI=320x240 fixed");
+    Platform_LogConst("[cc.gfx] raster=3D-192x144 Z8 scale5/3 UI=320x240");
 #else
     Platform_LogConst("[cc.gfx] raster=3D-lowres Z32 scaled UI=320x240");
 #endif

@@ -679,7 +679,6 @@ static void UpdateChunks(float delta) {
 	/* Build more chunks if 30 FPS or over, otherwise slowdown */
 	chunksTarget += delta < CHUNK_TARGET_TIME ? 1 : -1; 
 	Math_Clamp(chunksTarget, 4, maxChunkUpdates);
-
 	p = Entities.CurPlayer;
 	samePos = Vec3_Equals(&Camera.CurrentPos, &lastCamPos)
 		&& p->Base.Pitch == lastPitch && p->Base.Yaw == lastYaw;

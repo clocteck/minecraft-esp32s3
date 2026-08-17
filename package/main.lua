@@ -210,4 +210,4 @@ else
   log("tmr API unavailable; controller fallback polling disabled")
 end
 
-log("started", "native 320x240 SoftFP low-effects")
+log("started", "3D 192x144 scaled + UI 320x240 SoftFP low-effects")

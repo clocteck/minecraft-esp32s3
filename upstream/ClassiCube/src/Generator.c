@@ -357,6 +357,23 @@ static void NotchyGen_CreateHeightmap(void) {
 			if (height < 0) height *= 0.8f;
 
 			adjHeight = (int)(height + waterLevel);
+#ifdef CC_BUILD_ESP32S3
+			/* Blend the outer 24 blocks down to a shallow seabed. Water is
+			 * subsequently flooded in from the borders, forming an island
+			 * coastline instead of terrain cut off by a vertical map edge. */
+			{
+				int edgeX = min(x, World.MaxX - x);
+				int edgeZ = min(z, World.MaxZ - z);
+				int edgeDist = min(edgeX, edgeZ);
+				const int coastWidth = 24;
+				const int seabedHeight = waterLevel - 6;
+
+				if (edgeDist < coastWidth) {
+					adjHeight = seabedHeight +
+						((adjHeight - seabedHeight) * edgeDist) / coastWidth;
+				}
+			}
+#endif
 			minHeight = min(adjHeight, minHeight);
 			heightmap[hIndex++] = adjHeight;
 		}

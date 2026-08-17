@@ -141,7 +141,13 @@ void World_SetBlock(int x, int y, int z, BlockID block) {
 #endif
 
 BlockID World_GetPhysicsBlock(int x, int y, int z) {
+#ifdef CC_BUILD_ESP32S3
+	/* Holo worlds use a void boundary: players can leave the island or dig
+	 * through its bottom, then are respawned by the local-player kill plane. */
+	if (y < 0 || !World_ContainsXZ(x, z)) return BLOCK_AIR;
+#else
 	if (y < 0 || !World_ContainsXZ(x, z)) return BLOCK_BEDROCK;
+#endif
 	if (y >= World.Height) return BLOCK_AIR;
 
 	return World_GetBlock(x, y, z);
@@ -167,7 +173,12 @@ void Env_Reset(void) {
 	Env.CloudsHeight = -1;
 
 	Env.EdgeBlock  = BLOCK_STILL_WATER;
+#ifdef CC_BUILD_ESP32S3
+	/* Keep the ocean horizon, but do not draw a solid floor beneath it. */
+	Env.SidesBlock = BLOCK_AIR;
+#else
 	Env.SidesBlock = BLOCK_BEDROCK;
+#endif
 
 	Env.CloudsSpeed    = 1.0f;
 	Env.WeatherSpeed   = 1.0f;
