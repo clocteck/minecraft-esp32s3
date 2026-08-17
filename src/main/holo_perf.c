@@ -159,6 +159,7 @@ static void report_window(uint64_t now_us)
     log_append_avg_count(&line, " perspTri=", s_total.slots[HOLO_PERF_PERSPECTIVE_TRIANGLES]);
     log_append_avg_count(&line, " perspPx=", s_total.slots[HOLO_PERF_PERSPECTIVE_PIXELS]);
     log_append_avg_count(&line, " perspRc=", s_total.slots[HOLO_PERF_PERSPECTIVE_RECIPROCALS]);
+    log_append_avg_count(&line, " rQuad=", s_total.slots[HOLO_PERF_RASTER_QUADS]);
     log_append_avg_count(&line, " projV=", s_total.slots[HOLO_PERF_PROJECTED_VERTICES]);
     log_append_avg_count(&line, " projReuse=", s_total.slots[HOLO_PERF_PROJECTION_REUSE]);
     log_append_avg_count(&line, " cutPx=", s_total.slots[HOLO_PERF_FAST_CUTOUT_PIXELS]);

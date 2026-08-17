@@ -175,6 +175,7 @@ static cc_uint16 raster_to_color_y[CLASSICUBE_3D_HEIGHT + 1];
 static cc_uint64 rasterBboxPixels, rasterSpanPixels;
 static cc_uint64 rasterPerspectiveTriangles, rasterPerspectivePixels;
 static cc_uint64 rasterPerspectiveReciprocals;
+static cc_uint64 rasterTerrainQuads;
 static cc_uint64 rasterProjectedVertices, rasterProjectionReuse;
 /* These two diagnostics update on every visible pixel and cost about 0.7 ms
  * per frame on ESP32-S3. Define this only for short profiling builds. */
@@ -630,6 +631,7 @@ static void ClearDepthBuffer(void) {
     rasterBboxPixels = rasterSpanPixels = 0;
     rasterPerspectiveTriangles = rasterPerspectivePixels = 0;
     rasterPerspectiveReciprocals = 0;
+    rasterTerrainQuads = 0;
     rasterProjectedVertices = rasterProjectionReuse = 0;
 #ifdef CC_BUILD_SOFTFP_PIXEL_PROBES
     rasterFastCutoutPixels = 0;
@@ -794,15 +796,19 @@ void Gfx_DeleteMapCullBounds(void** bounds) {
 }
 
 void Gfx_BindMapCullBounds(void* bounds, int originX, int originY, int originZ) {
-    int i;
+    cc_uint8 planes;
     gfx_mapCullBounds = (const SoftFPMapQuadBounds*)bounds;
     if (!bounds) return;
 
     /* Convert world-space clip planes to the packed chunk-local 1/8 grid
-     * once per bound buffer bind. The per-quad hot loop keeps three FMULs. */
-    for (i = 0; i < NUM_PLANES; i++) {
+     * once per bound buffer bind. Most chunks are fully inside the frustum,
+     * so only prepare the planes which can actually clip this chunk. */
+    planes = mapClipPlanes;
+    while (planes) {
+        int i = __builtin_ctz((unsigned)planes);
         const SoftFPClipPlane* src = &quadCullPlanes[i];
         SoftFPClipPlane* dst = &mapCullLocalPlanes[i];
+        planes &= (cc_uint8)(planes - 1u);
         dst->x = src->x * 0.125f;
         dst->y = src->y * 0.125f;
         dst->z = src->z * 0.125f;
@@ -1560,7 +1566,23 @@ static CC_INLINE void StoreRasterGroup(int rasterX, int rasterY, SoftPixel color
     int colorX1 = raster_to_color_x[rasterX + 1];
     int colorY0 = raster_to_color_y[rasterY];
     int colorY1 = raster_to_color_y[rasterY + 1];
+    int colorWidth = colorX1 - colorX0, colorHeight = colorY1 - colorY0;
     int x, y;
+
+    /* 224x168 -> 320x240 and the 160x120 fallback both expand one raster
+     * sample to at most 2x2 output pixels. Keep a generic fallback for other
+     * window sizes, but make the per-visible-pixel path branch-only. */
+    if (colorWidth >= 1 && colorWidth <= 2 && colorHeight >= 1 && colorHeight <= 2) {
+        SoftPixel* dst = colorBuffer + colorY0 * cb_stride + colorX0;
+        dst[0] = color;
+        if (colorWidth == 2) dst[1] = color;
+        if (colorHeight == 2) {
+            dst += cb_stride;
+            dst[0] = color;
+            if (colorWidth == 2) dst[1] = color;
+        }
+        return;
+    }
 
     for (y = colorY0; y < colorY1; y++) {
         SoftPixel* dst = colorBuffer + y * cb_stride;
@@ -1574,7 +1596,24 @@ static CC_INLINE void BlendRasterGroup(int rasterX, int rasterY,
     int colorX1 = raster_to_color_x[rasterX + 1];
     int colorY0 = raster_to_color_y[rasterY];
     int colorY1 = raster_to_color_y[rasterY + 1];
+    int colorWidth = colorX1 - colorX0, colorHeight = colorY1 - colorY0;
     int x, y;
+
+    if (colorWidth >= 1 && colorWidth <= 2 && colorHeight >= 1 && colorHeight <= 2) {
+        SoftPixel* dst = colorBuffer + colorY0 * cb_stride + colorX0;
+        dst[0] = BlendSoftPixel(srcR, srcG, srcB, srcA, dst[0]);
+        if (colorWidth == 2) {
+            dst[1] = BlendSoftPixel(srcR, srcG, srcB, srcA, dst[1]);
+        }
+        if (colorHeight == 2) {
+            dst += cb_stride;
+            dst[0] = BlendSoftPixel(srcR, srcG, srcB, srcA, dst[0]);
+            if (colorWidth == 2) {
+                dst[1] = BlendSoftPixel(srcR, srcG, srcB, srcA, dst[1]);
+            }
+        }
+        return;
+    }
 
     for (y = colorY0; y < colorY1; y++) {
         SoftPixel* dst = colorBuffer + y * cb_stride;
@@ -1655,6 +1694,12 @@ static CC_INLINE cc_bool ClipSpanEdge(int value, int step, int* lower, int* uppe
 }
 
 #ifdef SOFTFP_FAST_TERRAIN_KERNEL
+static CC_INLINE cc_bool SoftFP_FastTerrainState(void) {
+    return gfx_format == VERTEX_FORMAT_TEXTURED && !texSinglePixel &&
+           colWrite && depthTest && depthWrite && gfx_alphaTest &&
+           !gfx_alphaBlend;
+}
+
 static CC_NOINLINE void DrawTriangleFastTerrain(VertexFixed* V0, VertexFixed* V1,
                                                 VertexFixed* V2, int area, int factor,
                                                 int perspectiveShift) {
@@ -1881,6 +1926,231 @@ next_split_terrain_pixel:
 
     rasterSpanPixels += spanPixelsLocal;
     rasterPerspectiveTriangles += perspectiveTrianglesLocal;
+    rasterPerspectivePixels += perspectivePixelsLocal;
+    rasterPerspectiveReciprocals += perspectiveReciprocalsLocal;
+#ifdef CC_BUILD_SOFTFP_PIXEL_PROBES
+    rasterFastCutoutPixels += fastCutoutPixelsLocal;
+#ifdef CC_BUILD_SOFTFP_FOG4
+    rasterFogPixels += fogPixelsLocal;
+#endif
+#endif
+}
+
+static CC_NOINLINE void DrawQuadFastTerrain(VertexFixed quad[4], int area,
+                                            int factor, int perspectiveShift) {
+    int x_fp[4], y_fp[4], x_edge[4], y_edge[4];
+    int edgeStart[4], edgeStepX[4], edgeStepY[4];
+    int minX, minY, maxX, maxY, rasterMaxX, rasterMaxY;
+    int w0 = quad[0].w, w1 = quad[1].w, w2 = quad[2].w, w3 = quad[3].w;
+    int u0, v0, u1, v1, u2, v2;
+    int dx01, dy01, dx12, dy12, dx20, dy20;
+    int bc0_start, bc1_start, bc2_start;
+    int step_ic0_per_x, step_ic1_per_x, step_ic2_per_x;
+    int step_w, step_u, step_v;
+    int orientation = area < 0 ? -1 : 1;
+    int perspectiveInterval = 1 << perspectiveShift;
+    int r1 = PackedCol_R(quad[0].c);
+    int g1 = PackedCol_G(quad[0].c);
+    int b1 = PackedCol_B(quad[0].c);
+    int x, y, i;
+    cc_bool perspective;
+    cc_uint32 spanPixelsLocal = 0;
+    cc_uint32 perspectivePrimitivesLocal = 0, perspectivePixelsLocal = 0;
+    cc_uint32 perspectiveReciprocalsLocal = 0;
+#ifdef CC_BUILD_SOFTFP_PIXEL_PROBES
+    cc_uint32 fastCutoutPixelsLocal = 0;
+#ifdef CC_BUILD_SOFTFP_FOG4
+    cc_uint32 fogPixelsLocal = 0;
+#endif
+#endif
+
+    for (i = 0; i < 4; i++) {
+        x_fp[i] = quad[i].x; y_fp[i] = quad[i].y;
+        x_edge[i] = SOFTFP_RASTER_COORD(x_fp[i]);
+        y_edge[i] = SOFTFP_RASTER_COORD(y_fp[i]);
+    }
+    minX = FixedToInt(min(min(x_fp[0], x_fp[1]), min(x_fp[2], x_fp[3])));
+    minY = FixedToInt(min(min(y_fp[0], y_fp[1]), min(y_fp[2], y_fp[3])));
+    maxX = FixedToInt(max(max(x_fp[0], x_fp[1]), max(x_fp[2], x_fp[3])));
+    maxY = FixedToInt(max(max(y_fp[0], y_fp[1]), max(y_fp[2], y_fp[3])));
+    rasterMaxX = (fb_maxX * raster_width) / fb_width;
+    rasterMaxY = (fb_maxY * raster_height) / fb_height;
+    if (maxX < 0 || minX > rasterMaxX || maxY < 0 || minY > rasterMaxY) return;
+    minX = max(minX, 0); maxX = min(maxX, rasterMaxX);
+    minY = max(minY, 0); maxY = min(maxY, rasterMaxY);
+    rasterBboxPixels += (cc_uint64)(maxX - minX + 1) *
+                        (cc_uint64)(maxY - minY + 1);
+    if (w0 <= 0 && w1 <= 0 && w2 <= 0 && w3 <= 0) return;
+
+    u0 = (int)((cc_uint32)quad[0].u * (cc_uint32)curTexWidth);
+    v0 = (int)((cc_uint32)quad[0].v * (cc_uint32)curTexHeight);
+    u1 = (int)((cc_uint32)quad[1].u * (cc_uint32)curTexWidth);
+    v1 = (int)((cc_uint32)quad[1].v * (cc_uint32)curTexHeight);
+    u2 = (int)((cc_uint32)quad[2].u * (cc_uint32)curTexWidth);
+    v2 = (int)((cc_uint32)quad[2].v * (cc_uint32)curTexHeight);
+
+    dx01 = y_edge[0] - y_edge[1]; dy01 = x_edge[1] - x_edge[0];
+    dx12 = y_edge[1] - y_edge[2]; dy12 = x_edge[2] - x_edge[1];
+    dx20 = y_edge[2] - y_edge[0]; dy20 = x_edge[0] - x_edge[2];
+    {
+        int sampleX = (minX << SOFTFP_RASTER_FP_SHIFT) + (SOFTFP_RASTER_FP_ONE >> 1);
+        int sampleY = (minY << SOFTFP_RASTER_FP_SHIFT) + (SOFTFP_RASTER_FP_ONE >> 1);
+        bc0_start = SoftFP_RasterEdge(x_edge[1], y_edge[1], x_edge[2], y_edge[2], sampleX, sampleY);
+        bc1_start = SoftFP_RasterEdge(x_edge[2], y_edge[2], x_edge[0], y_edge[0], sampleX, sampleY);
+        bc2_start = SoftFP_RasterEdge(x_edge[0], y_edge[0], x_edge[1], y_edge[1], sampleX, sampleY);
+        for (i = 0; i < 4; i++) {
+            int next = (i + 1) & 3;
+            edgeStart[i] = orientation * SoftFP_RasterEdge(
+                x_edge[i], y_edge[i], x_edge[next], y_edge[next], sampleX, sampleY);
+            edgeStepX[i] = orientation * (y_edge[i] - y_edge[next]);
+            edgeStepY[i] = orientation * (x_edge[next] - x_edge[i]);
+        }
+    }
+
+    {
+        int wMin = min(min(w0, w1), min(w2, w3));
+        int wMax = max(max(w0, w1), max(w2, w3));
+        perspective = wMin > 0 && wMax != wMin;
+    }
+    if (perspective) {
+        u0 = FixedMul(u0, w0); v0 = FixedMul(v0, w0);
+        u1 = FixedMul(u1, w1); v1 = FixedMul(v1, w1);
+        u2 = FixedMul(u2, w2); v2 = FixedMul(v2, w2);
+        /* Keep the existing counter in triangle-equivalent units. */
+        perspectivePrimitivesLocal = 2;
+    }
+
+    step_ic0_per_x = FixedMul(dx12, factor);
+    step_ic1_per_x = FixedMul(dx20, factor);
+    step_ic2_per_x = FixedMul(dx01, factor);
+    step_w = FixedMul(step_ic0_per_x, w0) +
+             FixedMul(step_ic1_per_x, w1) + FixedMul(step_ic2_per_x, w2);
+    step_u = FixedMul(step_ic0_per_x, u0) +
+             FixedMul(step_ic1_per_x, u1) + FixedMul(step_ic2_per_x, u2);
+    step_v = FixedMul(step_ic0_per_x, v0) +
+             FixedMul(step_ic1_per_x, v1) + FixedMul(step_ic2_per_x, v2);
+
+    for (y = minY; y <= maxY; y++) {
+        int spanLower = 0, spanUpper = maxX - minX;
+        cc_bool rowVisible = true;
+
+        for (i = 0; i < 4; i++) {
+            if (!ClipSpanEdge(edgeStart[i], edgeStepX[i], &spanLower, &spanUpper)) {
+                rowVisible = false; break;
+            }
+        }
+        if (rowVisible) {
+            int ic0 = FixedMul(bc0_start, factor) + step_ic0_per_x * spanLower;
+            int ic1 = FixedMul(bc1_start, factor) + step_ic1_per_x * spanLower;
+            int ic2 = FixedMul(bc2_start, factor) + step_ic2_per_x * spanLower;
+            int spanMinX = minX + spanLower;
+            int spanMaxX = minX + spanUpper;
+            int w_interp = FixedMul(ic0, w0) + FixedMul(ic1, w1) + FixedMul(ic2, w2);
+            int u_interp = FixedMul(ic0, u0) + FixedMul(ic1, u1) + FixedMul(ic2, u2);
+            int v_interp = FixedMul(ic0, v0) + FixedMul(ic1, v1) + FixedMul(ic2, v2);
+            int perspectiveU = 0, perspectiveV = 0;
+            int perspectiveStepU = 0, perspectiveStepV = 0;
+            int perspectiveEndU = 0, perspectiveEndV = 0;
+            int reciprocalEnd = 0, perspectiveRemain = 0;
+            cc_bool perspectiveValid = false;
+            DepthValue* fastDepth = depthBuffer + y * db_stride + spanMinX;
+
+            spanPixelsLocal += (cc_uint32)(spanMaxX - spanMinX + 1);
+            if (perspective) perspectivePixelsLocal += (cc_uint32)(spanMaxX - spanMinX + 1);
+
+            for (x = spanMinX; x <= spanMaxX; x++, fastDepth++) {
+                DepthValue fastZ;
+                if (w_interp <= 0) goto next_quad_terrain_pixel;
+                {
+                    int fastU, fastV, fastTexX, fastTexY;
+                    SoftTexel fastTexel;
+                    SoftPixel fastColor;
+
+                    fastZ = EncodeWDepth8(w_interp);
+                    if (fastZ > *fastDepth) goto next_quad_terrain_pixel;
+                    if (perspective && !perspectiveRemain) {
+                        int offset = x & (perspectiveInterval - 1);
+                        int segment = min(perspectiveInterval - offset, spanMaxX - x + 1);
+                        int baseW = w_interp - step_w * offset;
+                        int endW = baseW + step_w * perspectiveInterval;
+                        int baseReciprocal, endReciprocal;
+                        int baseU, baseV, endU, endV;
+                        int baseUOverW = u_interp - step_u * offset;
+                        int baseVOverW = v_interp - step_v * offset;
+                        int endUOverW = baseUOverW + step_u * perspectiveInterval;
+                        int endVOverW = baseVOverW + step_v * perspectiveInterval;
+
+                        if (baseW <= 0) {
+                            offset = 0;
+                            segment = min(perspectiveInterval, spanMaxX - x + 1);
+                            baseW = w_interp;
+                            endW = baseW + step_w * perspectiveInterval;
+                            baseUOverW = u_interp;
+                            baseVOverW = v_interp;
+                            endUOverW = baseUOverW + step_u * perspectiveInterval;
+                            endVOverW = baseVOverW + step_v * perspectiveInterval;
+                        }
+                        if (!offset && perspectiveValid) {
+                            baseReciprocal = reciprocalEnd;
+                            baseU = perspectiveEndU; baseV = perspectiveEndV;
+                        } else {
+                            baseReciprocal = FixedReciprocalFast(baseW);
+                            perspectiveReciprocalsLocal++;
+                            baseU = FixedMul(baseUOverW, baseReciprocal);
+                            baseV = FixedMul(baseVOverW, baseReciprocal);
+                        }
+                        if (endW > 0) {
+                            endReciprocal = FixedReciprocalFast(endW);
+                            perspectiveReciprocalsLocal++;
+                        } else {
+                            endReciprocal = baseReciprocal;
+                        }
+                        endU = FixedMul(endUOverW, endReciprocal);
+                        endV = FixedMul(endVOverW, endReciprocal);
+                        perspectiveStepU = (endU - baseU) >> perspectiveShift;
+                        perspectiveStepV = (endV - baseV) >> perspectiveShift;
+                        perspectiveU = baseU + perspectiveStepU * offset;
+                        perspectiveV = baseV + perspectiveStepV * offset;
+                        perspectiveEndU = endU; perspectiveEndV = endV;
+                        reciprocalEnd = endReciprocal;
+                        perspectiveRemain = segment;
+                        perspectiveValid = true;
+                    }
+                    fastU = perspective ? perspectiveU : u_interp;
+                    fastV = perspective ? perspectiveV : v_interp;
+                    fastTexX = FixedToInt(fastU) & texWidthMask;
+                    fastTexY = FixedToInt(fastV) & texHeightMask;
+                    fastTexel = curTexPixels[fastTexY * curTexWidth + fastTexX];
+                    if (!(fastTexel & SOFT_TEXEL_A_MASK)) goto next_quad_terrain_pixel;
+                    *fastDepth = fastZ;
+                    fastColor = SoftPixel_FromTexelTint(fastTexel, r1, g1, b1);
+#ifdef CC_BUILD_SOFTFP_FOG4
+                    fastColor = APPLY_FOG4(fastColor, w_interp, fogPixelsLocal);
+#endif
+                    StoreRasterGroup(x, y, fastColor);
+#ifdef CC_BUILD_SOFTFP_PIXEL_PROBES
+                    fastCutoutPixelsLocal++;
+#endif
+                }
+
+next_quad_terrain_pixel:
+                w_interp += step_w;
+                if (perspective && perspectiveRemain) {
+                    perspectiveU += perspectiveStepU;
+                    perspectiveV += perspectiveStepV;
+                    perspectiveRemain--;
+                }
+                u_interp += step_u;
+                v_interp += step_v;
+            }
+        }
+
+        bc0_start += dy12; bc1_start += dy20; bc2_start += dy01;
+        for (i = 0; i < 4; i++) edgeStart[i] += edgeStepY[i];
+    }
+
+    rasterSpanPixels += spanPixelsLocal;
+    rasterPerspectiveTriangles += perspectivePrimitivesLocal;
     rasterPerspectivePixels += perspectivePixelsLocal;
     rasterPerspectiveReciprocals += perspectiveReciprocalsLocal;
 #ifdef CC_BUILD_SOFTFP_PIXEL_PROBES
@@ -2425,9 +2695,7 @@ static CC_INLINE void DrawTriangle3D(VertexFixed* V0, VertexFixed* V1,
                                      VertexFixed* V2, int area, int factor,
                                      int perspectiveShift) {
 #ifdef SOFTFP_FAST_TERRAIN_KERNEL
-    if (gfx_format == VERTEX_FORMAT_TEXTURED && !texSinglePixel &&
-        colWrite && depthTest && depthWrite && gfx_alphaTest &&
-        !gfx_alphaBlend && PackedCol_A(V0->c) >= 0x80) {
+    if (SoftFP_FastTerrainState() && PackedCol_A(V0->c) >= 0x80) {
         DrawTriangleFastTerrain(V0, V1, V2, area, factor, perspectiveShift);
         return;
     }
@@ -2554,8 +2822,8 @@ static void ProcessClippedTriangleAndDraw(VertexFixed* inVerts, int polyCount,
     rasterProjectionReuse += (cc_uint32)((polyCount - 2) * 3 - polyCount);
 #endif
 
-    /* A clipped polygon is emitted as a triangle fan. Project each unique
-     * vertex once, then reuse it for both triangles of the common quad case.
+    /* Project each unique polygon vertex once. Fast map quads stay quads;
+     * other polygons are emitted as a triangle fan.
      * The old path repeated the reciprocal-W viewport transform six times
      * per quad, and repeated another six reciprocals when culling was active. */
     for (i = 0; i < polyCount; i++) {
@@ -2565,11 +2833,50 @@ static void ProcessClippedTriangleAndDraw(VertexFixed* inVerts, int polyCount,
 #endif
     }
 
-#ifdef CC_BUILD_ESP32S3
-    holo_perf_count_triangles((uint32_t)(polyCount - 2));
-#endif
 #ifdef CC_BUILD_SOFTFP_PERSPECTIVE4
     if (optimizeMap) perspectiveShift = 0;
+#endif
+
+#ifdef SOFTFP_FAST_TERRAIN_KERNEL
+    if (optimizeMap && polyCount == 4 && SoftFP_FastTerrainState() &&
+        PackedCol_A(inVerts[0].c) >= 0x80) {
+        VertexFixed* A = &inVerts[0];
+        VertexFixed* B = &inVerts[1];
+        VertexFixed* C = &inVerts[2];
+        VertexFixed* D = &inVerts[3];
+        int area = SoftFP_RasterEdge(
+            SOFTFP_RASTER_COORD(A->x), SOFTFP_RASTER_COORD(A->y),
+            SOFTFP_RASTER_COORD(B->x), SOFTFP_RASTER_COORD(B->y),
+            SOFTFP_RASTER_COORD(C->x), SOFTFP_RASTER_COORD(C->y));
+        int area2 = SoftFP_RasterEdge(
+            SOFTFP_RASTER_COORD(A->x), SOFTFP_RASTER_COORD(A->y),
+            SOFTFP_RASTER_COORD(C->x), SOFTFP_RASTER_COORD(C->y),
+            SOFTFP_RASTER_COORD(D->x), SOFTFP_RASTER_COORD(D->y));
+
+        /* Only take the direct path for a consistently wound convex quad.
+         * Degenerate and unusual model-like inputs retain the proven fan. */
+        if (ABS(area) > SOFTFP_RASTER_FP_ONE &&
+            ABS(area2) > SOFTFP_RASTER_FP_ONE &&
+            ((area ^ area2) >= 0)) {
+            int factor;
+            if (faceCulling && area > 0) return;
+            factor = FixedReciprocalFast(area);
+#ifdef CC_BUILD_SOFTFP_PERSPECTIVE4
+            if (!perspectiveShift) {
+                perspectiveShift = SoftFP_SelectPerspectiveShift(A, B, C, factor, minW);
+            }
+#endif
+            DrawQuadFastTerrain(inVerts, area, factor, perspectiveShift);
+#ifdef CC_BUILD_ESP32S3
+            rasterTerrainQuads++;
+#endif
+            return;
+        }
+    }
+#endif
+
+#ifdef CC_BUILD_ESP32S3
+    holo_perf_count_triangles((uint32_t)(polyCount - 2));
 #endif
 
     for (i = 1; i + 1 < polyCount; i++) {
@@ -2902,6 +3209,7 @@ void Gfx_EndFrame(void) {
     holo_perf_add(HOLO_PERF_PERSPECTIVE_TRIANGLES, rasterPerspectiveTriangles);
     holo_perf_add(HOLO_PERF_PERSPECTIVE_PIXELS, rasterPerspectivePixels);
     holo_perf_add(HOLO_PERF_PERSPECTIVE_RECIPROCALS, rasterPerspectiveReciprocals);
+    holo_perf_add(HOLO_PERF_RASTER_QUADS, rasterTerrainQuads);
     holo_perf_add(HOLO_PERF_PROJECTED_VERTICES, rasterProjectedVertices);
     holo_perf_add(HOLO_PERF_PROJECTION_REUSE, rasterProjectionReuse);
 #ifdef CC_BUILD_SOFTFP_PIXEL_PROBES
@@ -3077,7 +3385,7 @@ void Gfx_OnWindowResize(int width, int height) {
 #endif
 #endif
 #ifdef CC_BUILD_SOFTFP_QUAD_FRUSTUM_CULL
-    Platform_LogConst("[cc.gfx] frontend=map-only diagonal-AABB frustum cull packed-local/8 bounds=6B edge=20.12");
+    Platform_LogConst("[cc.gfx] frontend=map-only quad-raster diagonal-AABB cull packed-local/8 bounds=6B edge=20.12");
 #endif
 #ifdef CC_BUILD_SOFTFP_FOG4
     Platform_LogConst("[cc.gfx] fog=4-level quarter-strength");
