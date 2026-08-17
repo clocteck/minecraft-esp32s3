@@ -32,7 +32,7 @@ static uint32_t s_frames;
 static uint8_t s_frame_active;
 static int32_t s_pose_x100, s_pose_y100, s_pose_z100;
 static int32_t s_pose_yaw100, s_pose_pitch100;
-static uint32_t s_pose_hud_vertices;
+static uint32_t s_pose_world_vertices;
 
 static void counters_clear(HoloPerfCounters *counters)
 {
@@ -139,10 +139,6 @@ static void report_window(uint64_t now_us)
     log_append_u64(&line, s_frame_max_us / 1000U);
     log_append_avg_ms(&line, " logic=", s_total.slots[HOLO_PERF_LOGIC]);
     log_append_avg_ms(&line, " 3d=", s_total.slots[HOLO_PERF_RENDER3D]);
-    log_append_text(&line, " reuse3d=");
-    log_append_u64(&line, s_frames ?
-        (s_total.slots[HOLO_PERF_3D_REUSE] * 100U) / s_frames : 0);
-    log_append_char(&line, '%');
     log_append_avg_ms(&line, " gui=", s_total.slots[HOLO_PERF_GUI2D]);
     log_append_avg_ms(&line, " present=", s_total.slots[HOLO_PERF_PRESENT]);
     holo_port_log(line.data);
@@ -181,25 +177,13 @@ static void report_window(uint64_t now_us)
     log_append_avg_count(&line, " perspTri=", s_total.slots[HOLO_PERF_PERSPECTIVE_TRIANGLES]);
     log_append_avg_count(&line, " perspPx=", s_total.slots[HOLO_PERF_PERSPECTIVE_PIXELS]);
     log_append_avg_count(&line, " perspRc=", s_total.slots[HOLO_PERF_PERSPECTIVE_RECIPROCALS]);
-    log_append_avg_count(&line, " fcHit=", s_total.slots[HOLO_PERF_FRUSTUM_CACHE_HIT]);
-    log_append_avg_count(&line, " fcMiss=", s_total.slots[HOLO_PERF_FRUSTUM_CACHE_MISS]);
     log_append_avg_count(&line, " rQuad=", s_total.slots[HOLO_PERF_RASTER_QUADS]);
+    log_append_avg_count(&line, " oLutQ=", s_total.slots[HOLO_PERF_OPAQUE_LUT_QUADS]);
+    log_append_avg_count(&line, " oNoFogQ=", s_total.slots[HOLO_PERF_OPAQUE_NOFOG_QUADS]);
     log_append_avg_count(&line, " sprQ=", s_total.slots[HOLO_PERF_SPRITE_QUADS]);
     log_append_avg_count(&line, " sprCull=", s_total.slots[HOLO_PERF_SPRITE_CULL]);
-    log_append_avg_count(&line, " hizQ=", s_total.slots[HOLO_PERF_HIZ_TESTS]);
-    log_append_avg_count(&line, " hizCull=", s_total.slots[HOLO_PERF_HIZ_CULL]);
-    log_append_avg_count(&line, " chzQ=", s_total.slots[HOLO_PERF_CHUNK_HIZ_TESTS]);
-    log_append_avg_count(&line, " chzCull=", s_total.slots[HOLO_PERF_CHUNK_HIZ_CULL]);
-    log_append_avg_count(&line, " ghzQ=", s_total.slots[HOLO_PERF_GROUP_HIZ_TESTS]);
-    log_append_avg_count(&line, " ghzCull=", s_total.slots[HOLO_PERF_GROUP_HIZ_CULL]);
-    log_append_avg_count(&line, " thzHit=", s_total.slots[HOLO_PERF_TEMPORAL_HIZ_HIT]);
-    log_append_avg_count(&line, " thzMiss=", s_total.slots[HOLO_PERF_TEMPORAL_HIZ_MISS]);
-    log_append_avg_count(&line, " thzCull=", s_total.slots[HOLO_PERF_TEMPORAL_HIZ_CULL]);
-    log_append_avg_count(&line, " projV=", s_total.slots[HOLO_PERF_PROJECTED_VERTICES]);
-    log_append_avg_count(&line, " projReuse=", s_total.slots[HOLO_PERF_PROJECTION_REUSE]);
     log_append_avg_count(&line, " cutPx=", s_total.slots[HOLO_PERF_FAST_CUTOUT_PIXELS]);
     log_append_avg_count(&line, " fogPx=", s_total.slots[HOLO_PERF_FOG_PIXELS]);
-    log_append_avg_count(&line, " cull=", s_total.slots[HOLO_PERF_QUAD_CULL]);
     if (host && host->heap.free_size) {
         internal_free = host->heap.free_size(MODULE_HEAP_INTERNAL | MODULE_HEAP_8BIT);
         psram_free = host->heap.free_size(MODULE_HEAP_PSRAM | MODULE_HEAP_8BIT);
@@ -231,8 +215,8 @@ static void report_window(uint64_t now_us)
     log_append_signed_fixed2(&line, s_pose_yaw100);
     log_append_text(&line, " pitch=");
     log_append_signed_fixed2(&line, s_pose_pitch100);
-    log_append_text(&line, " hud=");
-    log_append_u64(&line, s_pose_hud_vertices);
+    log_append_text(&line, " worldV=");
+    log_append_u64(&line, s_pose_world_vertices);
     holo_port_log(line.data);
 }
 
@@ -289,9 +273,9 @@ void holo_perf_count_bbox_pixels(uint64_t count) { if (s_frame_active) s_frame.b
 void holo_perf_count_chunk_build(void) { if (s_frame_active) s_frame.chunk_builds++; }
 void holo_perf_count_dma_submit(void) { if (s_frame_active) s_frame.dma_submits++; }
 void holo_perf_set_pose(int32_t x100, int32_t y100, int32_t z100,
-                        int32_t yaw100, int32_t pitch100, uint32_t hud_vertices)
+                        int32_t yaw100, int32_t pitch100, uint32_t world_vertices)
 {
     s_pose_x100 = x100; s_pose_y100 = y100; s_pose_z100 = z100;
     s_pose_yaw100 = yaw100; s_pose_pitch100 = pitch100;
-    s_pose_hud_vertices = hud_vertices;
+    s_pose_world_vertices = world_vertices;
 }

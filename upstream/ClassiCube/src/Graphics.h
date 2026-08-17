@@ -185,10 +185,6 @@ CC_API void Gfx_ClearColor(PackedCol color);
 
 /* Sets up state for rendering a new frame */
 void Gfx_BeginFrame(void);
-#ifdef CC_BUILD_ESP32S3
-/* Keeps the previous 3D colour/depth samples while resetting diagnostics. */
-void Gfx_Reuse3DBuffers(void);
-#endif
 /* Finishes rendering a frame, and swaps it with the back buffer */
 void Gfx_EndFrame(void);
 /* Sets whether to synchronise rendering with monitor refresh to avoid tearing */

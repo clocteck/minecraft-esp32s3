@@ -34,24 +34,28 @@ geometry changes invalidate it. Terrain and models use PS1-style affine texture
 mapping with full-rate texel sampling. The ESP32-S3 hot path shares one compact
 affine triangle/quad kernel, advances interpolation planes by scanline, batches
 Hi-Z coverage bits, and caches final shaded opaque terrain tiles internally.
-Two 48-row RGB565 colour bands keep the lower 96 raster rows in internal RAM;
-the dynamic-VB arena is 12 KiB, with its colder tail falling back to PSRAM so
-the mandatory DMA buffers retain priority.
+Distance fog is disabled: the ordered low-cost variant was visibly granular at
+192x144, while smooth per-pixel fog consumed too much of the full-frame budget.
+Two 48-row and two 16-row RGB565 colour bands keep 128 of 144 raster rows
+(49,152 bytes) in internal RAM; the dynamic-VB arena is 12 KiB, with its colder
+tail falling back to PSRAM so the mandatory DMA buffers retain priority.
 
 For repeatable profiling, serial output includes camera position, yaw, pitch,
-HUD vertex count, submitted quads, raster primitives, bounding-box/span pixels,
-Hi-Z decisions, projected vertices, and perspective reciprocal counts. A
-10-second fixed-seed checkpoint at `(64.50, 30.62, 64.50)`, yaw/pitch zero,
-view distance 20 now sustains about 26.68-26.85 displayed FPS / 37.1-37.4 ms
-frame on the tested device, up from 17.68-18.03 FPS for the previous renderer.
-For an exactly unchanged view with no pending chunk rebuild, two complete 3D
-frames are followed by one reused 3D sample (`reuse3d=33%`). Thus UI/display
-refresh stays near 26.8 FPS while newly rasterised 3D frames update at roughly
-17.8 Hz in that stationary case; camera movement disables reuse immediately.
-Continuous-motion FPS still requires a controller-driven device measurement.
-The native HUD keeps a concise FPS readout; detailed pose and pipeline statistics
-remain on serial. Generated still liquids remain static to avoid continuous
-background remeshing, while player-placed liquids still flow.
+world mesh vertex count, submitted quads, raster primitives, bounding-box/span
+pixels, texture/tint-cache activity, opaque fast-path counts, and perspective
+reciprocal counts. Every
+display frame clears, transforms, and rasterises a new 3D frame; unchanged
+camera views are never reused or skipped. Fixed-seed performance figures must
+therefore represent newly generated 3D frames rather than display refreshes.
+The native HUD keeps the original FPS/vertex-count/position readout; detailed
+pose and pipeline statistics remain on serial. Generated still liquids remain
+static to avoid continuous background remeshing, while player-placed liquids
+still flow.
+
+On the fixed spawn view, the current full-frame path measures about 41.2-41.6 ms
+per frame (roughly 24 FPS): about 31 ms is 3D work and 7.5-7.7 ms is native
+UI/upscaling. The next target is a real 28 FPS (35.7 ms) newly generated frame;
+display refresh or an unchanged-frame shortcut does not count toward it.
 
 Sound effects use one host-owned mono I2S stream. Up to eight virtual voices
 are mixed by a PSRAM-stack worker pinned to Core 0; sound samples remain in

@@ -27,7 +27,7 @@
 #define BTN_R2     2048u
 #define BTN_SELECT 4096u
 #define BTN_START  8192u
-#define PRESENT_STACK_BYTES (12u * 1024u)
+#define PRESENT_STACK_BYTES (8u * 1024u)
 #define RIGHT_STICK_LOOK_MULTIPLIER 6.0f
 
 struct _DisplayData DisplayInfo;
@@ -42,6 +42,7 @@ typedef BitmapCol HoloFramebufferPixel;
 #endif
 static HoloFramebufferPixel *s_framebuffers[2];
 static unsigned s_render_buffer;
+static uint8_t s_core1_yield_count;
 static void * volatile s_present_task;
 static module_sync_handle_t s_present_ready;
 static module_sync_handle_t s_present_done;
@@ -228,6 +229,8 @@ static cc_bool StartPresentWorker(void)
         return false;
     }
     s_present_task = task;
+    s_core1_yield_count = 0;
+    holo_port_log("[cc.present] Core1 idle yield=1ms/8 full frames");
     return true;
 }
 
@@ -497,8 +500,12 @@ void Window_DrawFramebuffer(Rect2D r, struct Bitmap *bmp)
         if (host->sync.give(s_present_ready) == MODULE_OK) {
             s_render_buffer = next_buffer;
             bmp->scan0 = (BitmapCol*)s_framebuffers[s_render_buffer];
-            /* Let IDLE1 run every frame so the task watchdog is serviced. */
-            if (host->task.delay) host->task.delay(1);
+            /* A periodic real delay lets IDLE1 service the task watchdog
+             * without charging every newly generated frame a full tick. */
+            if (++s_core1_yield_count >= 8) {
+                s_core1_yield_count = 0;
+                if (host->task.delay) host->task.delay(1);
+            }
             return;
         }
         s_present_pixels = NULL;

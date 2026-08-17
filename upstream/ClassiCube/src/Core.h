@@ -576,7 +576,9 @@ typedef cc_uint8  cc_bool;
 	#define CC_BUILD_SOFTFP_W_DEPTH8
 	#define CC_BUILD_SOFTFP_FAST_CUTOUT
 	#define CC_BUILD_SOFTFP_TERRAIN_TILE_CACHE
-	#define CC_BUILD_SOFTFP_FOG4
+	/* Fog is intentionally disabled on ESP32-S3. Ordered screen-door fog was
+	 * fast but visibly granular at 192x144, while smooth per-pixel fog costs
+	 * too much of the full-frame budget. */
 	#undef  CC_BUILD_FREETYPE
 	#undef  CC_BUILD_RESOURCES
 	#undef  CC_BUILD_PLUGINS

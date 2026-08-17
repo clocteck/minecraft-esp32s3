@@ -6,7 +6,6 @@
 typedef enum HoloPerfSlot {
     HOLO_PERF_LOGIC = 0,
     HOLO_PERF_RENDER3D,
-    HOLO_PERF_3D_REUSE,
     HOLO_PERF_GUI2D,
     HOLO_PERF_PRESENT,
     HOLO_PERF_MAP_UPDATE,
@@ -32,25 +31,13 @@ typedef enum HoloPerfSlot {
     HOLO_PERF_PERSPECTIVE_TRIANGLES,
     HOLO_PERF_PERSPECTIVE_PIXELS,
     HOLO_PERF_PERSPECTIVE_RECIPROCALS,
-    HOLO_PERF_FRUSTUM_CACHE_HIT,
-    HOLO_PERF_FRUSTUM_CACHE_MISS,
     HOLO_PERF_RASTER_QUADS,
+    HOLO_PERF_OPAQUE_LUT_QUADS,
+    HOLO_PERF_OPAQUE_NOFOG_QUADS,
     HOLO_PERF_SPRITE_QUADS,
     HOLO_PERF_SPRITE_CULL,
-    HOLO_PERF_HIZ_TESTS,
-    HOLO_PERF_HIZ_CULL,
-    HOLO_PERF_CHUNK_HIZ_TESTS,
-    HOLO_PERF_CHUNK_HIZ_CULL,
-    HOLO_PERF_GROUP_HIZ_TESTS,
-    HOLO_PERF_GROUP_HIZ_CULL,
-    HOLO_PERF_TEMPORAL_HIZ_HIT,
-    HOLO_PERF_TEMPORAL_HIZ_MISS,
-    HOLO_PERF_TEMPORAL_HIZ_CULL,
-    HOLO_PERF_PROJECTED_VERTICES,
-    HOLO_PERF_PROJECTION_REUSE,
     HOLO_PERF_FAST_CUTOUT_PIXELS,
     HOLO_PERF_FOG_PIXELS,
-    HOLO_PERF_QUAD_CULL,
     HOLO_PERF_SLOT_COUNT
 } HoloPerfSlot;
 
@@ -65,6 +52,6 @@ void holo_perf_count_bbox_pixels(uint64_t count);
 void holo_perf_count_chunk_build(void);
 void holo_perf_count_dma_submit(void);
 void holo_perf_set_pose(int32_t x100, int32_t y100, int32_t z100,
-                        int32_t yaw100, int32_t pitch100, uint32_t hud_vertices);
+                        int32_t yaw100, int32_t pitch100, uint32_t world_vertices);
 
 #endif

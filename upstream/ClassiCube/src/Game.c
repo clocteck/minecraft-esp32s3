@@ -44,9 +44,6 @@
 #include "SystemFonts.h"
 #include "Formats.h"
 #include "EntityRenderers.h"
-#if defined CC_BUILD_ESP32S3 && !defined CC_BUILD_SPLITSCREEN
-#include "Platform.h"
-#endif
 
 struct _GameData Game;
 static cc_uint64 frameStart;
@@ -70,31 +67,6 @@ cc_bool Game_Anaglyph3D;
 cc_bool Game_ViewBobbing, Game_HideGui;
 cc_bool Game_BreakableLiquids, Game_ScreenshotRequested;
 struct GameVersion Game_Version;
-
-#if defined CC_BUILD_ESP32S3 && !defined CC_BUILD_SPLITSCREEN
-static struct Matrix esp32s3_cachedView, esp32s3_cachedProjection;
-static cc_bool esp32s3_sceneValid;
-static cc_uint8 esp32s3_fullFrames;
-
-static cc_bool ESP32S3_CanReuse3D(void) {
-	struct Matrix currentView;
-	if (!esp32s3_sceneValid || esp32s3_fullFrames < 2 || Game_Anaglyph3D ||
-		!MapRenderer_CanReuseFrame()) return false;
-	Camera.Active->GetView(&currentView);
-	return Mem_Equal(&currentView, &esp32s3_cachedView, sizeof(currentView)) &&
-		Mem_Equal(&Gfx.Projection, &esp32s3_cachedProjection, sizeof(Gfx.Projection));
-}
-
-static void ESP32S3_Record3D(void) {
-	cc_bool sameView = esp32s3_sceneValid &&
-		Mem_Equal(&Gfx.View, &esp32s3_cachedView, sizeof(Gfx.View)) &&
-		Mem_Equal(&Gfx.Projection, &esp32s3_cachedProjection, sizeof(Gfx.Projection));
-	esp32s3_cachedView       = Gfx.View;
-	esp32s3_cachedProjection = Gfx.Projection;
-	esp32s3_sceneValid = true;
-	esp32s3_fullFrames = sameView ? min(esp32s3_fullFrames + 1, 2) : 1;
-}
-#endif
 
 static char usernameBuffer[STRING_SIZE];
 static char mppassBuffer[STRING_SIZE];
@@ -725,57 +697,24 @@ static CC_INLINE void Game_DrawFrame(float delta, float t) {
 #ifdef CC_BUILD_ESP32S3
 	cc_uint64 perfMark;
 #endif
-#if defined CC_BUILD_ESP32S3 && !defined CC_BUILD_SPLITSCREEN
-	cc_bool reuse3D = false;
-#endif
-
 	if (!Gui_GetBlocksWorld()) {
 		Camera.Active->GetPickedBlock(&Game_SelectedPos); /* TODO: only pick when necessary */
 		Camera_KeyLookUpdate(delta);
 		InputHandler_Tick(delta);
 
-#if defined CC_BUILD_ESP32S3 && !defined CC_BUILD_SPLITSCREEN
-		reuse3D = ESP32S3_CanReuse3D();
-		if (reuse3D) {
-			Gfx_Reuse3DBuffers();
-			esp32s3_fullFrames = 0;
-			holo_perf_add(HOLO_PERF_3D_REUSE, 1);
-		} else {
-			Gfx_ClearBuffers(GFX_BUFFER_COLOR | GFX_BUFFER_DEPTH);
-		}
-#endif
-
 #ifdef CC_BUILD_ESP32S3
 		perfMark = Stopwatch_Measure();
 #endif
-		if (
-#if defined CC_BUILD_ESP32S3 && !defined CC_BUILD_SPLITSCREEN
-			!reuse3D &&
-#endif
-			Game_Anaglyph3D) {
+		if (Game_Anaglyph3D) {
 			Render3D_Anaglyph(delta, t);
-		} else if (
-#if defined CC_BUILD_ESP32S3 && !defined CC_BUILD_SPLITSCREEN
-			!reuse3D
-#else
-			true
-#endif
-		) {
+		} else {
 			Render3DFrame(delta, t);
 		}
 #ifdef CC_BUILD_ESP32S3
 		holo_perf_add(HOLO_PERF_RENDER3D, Stopwatch_ElapsedMicroseconds(perfMark, Stopwatch_Measure()));
 #endif
-#if defined CC_BUILD_ESP32S3 && !defined CC_BUILD_SPLITSCREEN
-		if (!reuse3D) ESP32S3_Record3D();
-#endif
 	} else {
 		RayTracer_SetInvalid(&Game_SelectedPos);
-#if defined CC_BUILD_ESP32S3 && !defined CC_BUILD_SPLITSCREEN
-		Gfx_ClearBuffers(GFX_BUFFER_COLOR | GFX_BUFFER_DEPTH);
-		esp32s3_sceneValid = false;
-		esp32s3_fullFrames = 0;
-#endif
 	}
 
 #ifdef CC_BUILD_ESP32S3
@@ -914,9 +853,7 @@ void Game_RenderFrame(void) {
 		return;
 	}
 #endif
-#if !defined CC_BUILD_ESP32S3 || defined CC_BUILD_SPLITSCREEN
 	Gfx_ClearBuffers(GFX_BUFFER_COLOR | GFX_BUFFER_DEPTH);
-#endif
 	
 #ifdef CC_BUILD_SPLITSCREEN
 	switch (Game_NumStates) {
