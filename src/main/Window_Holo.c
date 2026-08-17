@@ -358,7 +358,7 @@ void Gamepads_Process(float delta)
     Gamepad_SetButton(port, CCPAD_ZR,     b & BTN_R2);
     Gamepad_SetButton(port, CCPAD_SELECT, b & BTN_SELECT);
     Gamepad_SetButton(port, CCPAD_START,  b & BTN_START);
-    Gamepad_SetAxis(port, PAD_AXIS_LEFT, input.lx / 32767.0f, input.ly / 32767.0f, delta);
+    Gamepad_SetAxis(port, PAD_AXIS_LEFT, input.lx / 32767.0f, -input.ly / 32767.0f, delta);
     Gamepad_SetAxis(port, PAD_AXIS_RIGHT, input.rx / 32767.0f, input.ry / 32767.0f,
                     Input.RawMode ? delta * RIGHT_STICK_LOOK_MULTIPLIER : delta);
 }
@@ -403,8 +403,10 @@ static cc_bool PresentFramebuffer(HoloFramebufferPixel *pixels, uint64_t *conver
     if (dma_submits) *dma_submits = 0;
     if (!host || !surface || !pixels || !host->display.startWrite ||
         !host->display.pushImageDMA || !host->display.endWrite) return false;
-    dma[0] = holo_port_dma_buffer(CLASSICUBE_DISPLAY_WIDTH * 16, 0);
-    dma[1] = holo_port_dma_buffer(CLASSICUBE_DISPLAY_WIDTH * 16, 1);
+    dma[0] = (uint16_t *)holo_port_buffer(
+        CLASSICUBE_DISPLAY_WIDTH * 16 * sizeof(uint16_t), 0);
+    dma[1] = (uint16_t *)holo_port_buffer(
+        CLASSICUBE_DISPLAY_WIDTH * 16 * sizeof(uint16_t), 1);
     if (!dma[0] || !dma[1]) return false;
 
     started = holo_perf_now_us();

@@ -7,7 +7,7 @@ of producing a standalone flash image.
 ## First-version scope
 
 - offline single-player only
-- 160x120 rendering, enlarged 2x to the 320x240 display
+- 240x180 3D rendering, enlarged to the 320x240 display (160x120 internal-RAM fallback)
 - ClassiCube SoftFP fixed-point software renderer
 - RGB565 DMA output to the host display
 - game state/options/maps on SD card
@@ -15,9 +15,11 @@ of producing a standalone flash image.
 - PSRAM-backed game heap and task stack
 - no networking, music, sound, updater, plugins, or FreeType
 
-The double-buffered 160x120 colour buffers and depth buffer live in PSRAM. This build
-therefore requires PSRAM and intentionally limits the initial single-player
-world and view distance.
+The double-buffered 320x240 colour buffers live in PSRAM. The 240x180 Z8 depth
+buffer (43,200 bytes) is reserved in internal RAM; allocation failure is reported over serial
+and falls back to an internal-RAM 160x120 depth buffer instead of PSRAM. This
+build still requires PSRAM for the game heap and intentionally limits the
+initial single-player world and view distance.
 
 ## Build
 

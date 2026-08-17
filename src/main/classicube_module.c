@@ -232,7 +232,7 @@ static int l_info(lua_State *L)
     set_integer(L, "width", CLASSICUBE_RENDER_WIDTH);
     set_integer(L, "height", CLASSICUBE_RENDER_HEIGHT);
     set_integer(L, "input_mask", input.buttons);
-    set_string(L, "renderer", "SoftFP perspective/4 reciprocal-W Z32 RGB565 160x120x2");
+    set_string(L, "renderer", "SoftFP perspective/4 reciprocal-W Z8 RGB565 240x180 scaled");
     set_string(L, "last_error", holo_port_last_error());
     if (s_host->heap.free_size)
         set_integer(L, "psram_free", s_host->heap.free_size(MODULE_HEAP_PSRAM | MODULE_HEAP_8BIT));

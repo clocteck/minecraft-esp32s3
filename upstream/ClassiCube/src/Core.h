@@ -563,17 +563,17 @@ typedef cc_uint8  cc_bool;
 	#define CC_BUILD_FPU_MODE CC_FPU_MODE_REDUCED
 	#define CC_DISABLE_EXTRA_MODELS
 	#define CC_BUILD_SOFTFP_PERSPECTIVE4
-	/* Z16 NDC interpolation is intentionally disabled until its ordering
-	 * matches the original SoftFP depth convention at every view angle. */
+	/* Use compact reciprocal-W Z8 depth so the 240x180 buffer stays in
+	 * internal RAM; the logarithmic near range preserves useful precision. */
 	#define CC_BUILD_SOFTFP_HALF_ALPHA
 	#define CC_BUILD_SOFTFP_TEX16
 	#define CC_BUILD_SOFTFP_FB16
 	#define CC_BUILD_SOFTFP_FLOAT_XFORM
 	#define CC_BUILD_SOFTFP_QUAD_FRUSTUM_CULL
 	#define CC_BUILD_SOFTFP_ASYNC_CLEAR
-	#define CC_BUILD_SOFTFP_2X2_RASTER
+	#define CC_BUILD_SOFTFP_LOWRES_RASTER
 	#define CC_BUILD_SOFTFP_W_DEPTH
-	#define CC_BUILD_SOFTFP_W_DEPTH16
+	#define CC_BUILD_SOFTFP_W_DEPTH8
 	#define CC_BUILD_SOFTFP_FAST_CUTOUT
 	#define CC_BUILD_SOFTFP_FOG4
 	#undef  CC_BUILD_FREETYPE

@@ -15,6 +15,7 @@ Copyright 2014-2025 ClassiCube | Licensed under BSD-3
 #define OPT_MAX_MUSIC_DELAY "music-maxdelay"
 
 #define OPT_VIEW_DISTANCE "viewdist"
+#define OPT_REACH_DISTANCE "reach-distance"
 #define OPT_BLOCK_PHYSICS "singleplayerphysics"
 #define OPT_NAMES_MODE "namesmode"
 #define OPT_INVERT_MOUSE "invertmouse"

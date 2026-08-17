@@ -3,8 +3,8 @@
 #include <string.h>
 
 #define DMA_ROWS   16u
-#define DMA_PIXELS (CLASSICUBE_DISPLAY_WIDTH * DMA_ROWS)
-#define RENDER_CACHE_PIXELS ((CLASSICUBE_RENDER_WIDTH / 2u) * (CLASSICUBE_RENDER_HEIGHT / 2u))
+#define DMA_BYTES (CLASSICUBE_DISPLAY_WIDTH * DMA_ROWS * sizeof(uint16_t))
+#define RENDER_CACHE_BYTES (CLASSICUBE_3D_WIDTH * CLASSICUBE_3D_HEIGHT)
 #define DMA_BUFFERS 3u
 #define HOT_VB_ARENA_BYTES (16u * 1024u)
 
@@ -20,7 +20,8 @@ static volatile HoloInputState s_input;
 static volatile uint8_t s_stop_requested;
 static volatile uint32_t s_frames;
 static void *s_display_surface;
-static uint16_t *s_dma_buffers[DMA_BUFFERS];
+static void *s_dma_buffers[DMA_BUFFERS];
+static size_t s_dma_buffer_bytes[DMA_BUFFERS];
 static uint8_t *s_hot_vb_arena;
 static uint32_t s_hot_vb_used;
 static uint32_t s_hot_vb_count;
@@ -122,6 +123,7 @@ void holo_port_display_release(void)
         for (i = 0; i < DMA_BUFFERS; i++) {
             if (s_dma_buffers[i]) s_host->heap.free(s_dma_buffers[i]);
             s_dma_buffers[i] = NULL;
+            s_dma_buffer_bytes[i] = 0;
         }
     }
     if (s_display_surface && s_host && s_host->display.release)
@@ -131,19 +133,21 @@ void holo_port_display_release(void)
 
 void *holo_port_display_surface(void) { return s_display_surface; }
 
-uint16_t *holo_port_dma_buffer(size_t pixels, unsigned index)
+void *holo_port_buffer(size_t bytes, unsigned index)
 {
     size_t capacity;
     uint32_t caps = MODULE_HEAP_INTERNAL | MODULE_HEAP_8BIT;
     if (index >= DMA_BUFFERS || !s_host || !s_host->heap.malloc) return NULL;
-    capacity = index == 2 ? RENDER_CACHE_PIXELS : DMA_PIXELS;
-    if (pixels > capacity) return NULL;
-    if (s_dma_buffers[index]) return s_dma_buffers[index];
+    capacity = index == 2 ? RENDER_CACHE_BYTES : DMA_BYTES;
+    if (bytes > capacity) return NULL;
+    if (s_dma_buffers[index]) {
+        return bytes <= s_dma_buffer_bytes[index] ? s_dma_buffers[index] : NULL;
+    }
     if (index < 2) caps |= MODULE_HEAP_DMA;
-    s_dma_buffers[index] = (uint16_t *)s_host->heap.malloc(
-        capacity * sizeof(uint16_t), caps);
+    s_dma_buffers[index] = s_host->heap.malloc(bytes, caps);
+    if (s_dma_buffers[index]) s_dma_buffer_bytes[index] = bytes;
     if (!s_dma_buffers[index]) holo_port_set_last_error(
-        index == 2 ? "cannot allocate 38 KiB internal depth buffer" : "cannot allocate 10 KiB internal DMA buffer");
+        index == 2 ? "cannot allocate internal 3D depth buffer" : "cannot allocate 10 KiB internal DMA buffer");
     return s_dma_buffers[index];
 }
 

@@ -780,6 +780,10 @@ static const struct EntityVTABLE localPlayer_VTABLE = {
 	LocalPlayer_Tick,        Player_Despawn,         LocalPlayer_SetLocation, Entity_GetColor,
 	LocalPlayer_RenderModel, LocalPlayer_ShouldRenderName
 };
+static float LocalPlayer_DefaultReachDistance(void) {
+	return Options_GetFloat(OPT_REACH_DISTANCE, 1.0f, 1024.0f, 5.0f);
+}
+
 static void LocalPlayer_Init(struct LocalPlayer* p, int index) {
 	struct HacksComp* hacks = &p->Hacks;
 
@@ -794,7 +798,7 @@ static void LocalPlayer_Init(struct LocalPlayer* p, int index) {
 	TiltComp_Init(&p->Tilt);
 
 	p->Base.Flags |= ENTITY_FLAG_MODEL_RESTRICTED_SCALE;
-	p->ReachDistance = 5.0f;
+	p->ReachDistance = LocalPlayer_DefaultReachDistance();
 	p->Physics.Hacks = &p->Hacks;
 	p->Physics.Collisions = &p->Collisions;
 	p->Base.VTABLE   = &localPlayer_VTABLE;
@@ -821,7 +825,7 @@ void LocalPlayer_ResetJumpVelocity(struct LocalPlayer* p) {
 }
 
 static void LocalPlayer_Reset(struct LocalPlayer* p) {
-	p->ReachDistance = 5.0f;
+	p->ReachDistance = LocalPlayer_DefaultReachDistance();
 	Vec3_Set(p->Base.Velocity, 0,0,0);
 	LocalPlayer_ResetJumpVelocity(p);
 }

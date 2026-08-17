@@ -9,6 +9,10 @@
 
 #define CLASSICUBE_RENDER_WIDTH   320
 #define CLASSICUBE_RENDER_HEIGHT  240
+#define CLASSICUBE_3D_WIDTH       240
+#define CLASSICUBE_3D_HEIGHT      180
+#define CLASSICUBE_3D_FALLBACK_WIDTH  160
+#define CLASSICUBE_3D_FALLBACK_HEIGHT 120
 #define CLASSICUBE_DISPLAY_WIDTH  320
 #define CLASSICUBE_DISPLAY_HEIGHT 240
 #define CLASSICUBE_UI_DPI_SCALE   0.50f
@@ -39,7 +43,7 @@ bool holo_port_stop_requested(void);
 bool holo_port_display_acquire(void);
 void holo_port_display_release(void);
 void *holo_port_display_surface(void);
-uint16_t *holo_port_dma_buffer(size_t pixels, unsigned index);
+void *holo_port_buffer(size_t bytes, unsigned index);
 
 bool holo_port_hot_vb_reserve(void);
 void *holo_port_hot_vb_alloc(size_t bytes);

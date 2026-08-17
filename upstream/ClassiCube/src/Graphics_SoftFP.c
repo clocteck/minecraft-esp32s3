@@ -12,6 +12,7 @@
 #ifdef CC_BUILD_ESP32S3
 #include "holo_perf.h"
 #include "holo_port.h"
+#include "Platform.h"
 #if defined(__GNUC__)
 #pragma GCC optimize ("O3")
 #endif
@@ -112,8 +113,10 @@ static SoftPixel fogPixel;
 static int fogWStart, fogWQuarter, fogWHalf, fogWEnd;
 #endif
 
-#if defined CC_BUILD_SOFTFP_Z16_TILES || defined CC_BUILD_SOFTFP_W_DEPTH16
+#ifdef CC_BUILD_SOFTFP_Z16_TILES
 #define DEPTH_CLEAR_VALUE 0xFFFFu
+#elif defined CC_BUILD_SOFTFP_W_DEPTH8
+#define DEPTH_CLEAR_VALUE 0xFFu
 #endif
 
 #ifdef CC_BUILD_SOFTFP_Z16_TILES
@@ -131,8 +134,8 @@ static cc_uint16 depthCacheTags[DEPTH_CACHE_LINES];
 static cc_uint8 depthCacheDirty[DEPTH_CACHE_LINES];
 static cc_uint8 depthBackingValid[DEPTH_TILE_COUNT];
 static cc_uint32 depthCacheHits, depthCacheMisses, depthCacheWritebacks;
-#elif defined CC_BUILD_SOFTFP_W_DEPTH16
-typedef cc_uint16 DepthValue;
+#elif defined CC_BUILD_SOFTFP_W_DEPTH8
+typedef cc_uint8 DepthValue;
 static DepthValue* depthBuffer;
 static cc_bool depthBufferInternal;
 #elif defined CC_BUILD_SOFTFP_Z32_FASTCLEAR
@@ -144,7 +147,7 @@ static DepthValue* depthBuffer;
 #endif
 #ifdef CC_BUILD_SOFTFP_ASYNC_CLEAR
 static cc_bool asyncPresenterClear, asyncDepthClear;
-#if !defined CC_BUILD_SOFTFP_Z16_TILES && !defined CC_BUILD_SOFTFP_W_DEPTH16 && !defined CC_BUILD_SOFTFP_Z32_FASTCLEAR
+#if !defined CC_BUILD_SOFTFP_Z16_TILES && !defined CC_BUILD_SOFTFP_W_DEPTH8 && !defined CC_BUILD_SOFTFP_Z32_FASTCLEAR
 static DepthValue* depthBuffers[2];
 static unsigned depthBufferIndex;
 #endif
@@ -152,11 +155,16 @@ static unsigned depthBufferIndex;
 static cc_bool depthTest  = true;
 static cc_bool depthWrite = true;
 static int db_stride, db_height;
-#ifdef CC_BUILD_SOFTFP_2X2_RASTER
+#ifdef CC_BUILD_SOFTFP_LOWRES_RASTER
+static int raster_width  = CLASSICUBE_3D_WIDTH;
+static int raster_height = CLASSICUBE_3D_HEIGHT;
+static int vp_raster_hwidth_fp, vp_raster_hheight_fp;
+static cc_uint16 raster_to_color_x[CLASSICUBE_3D_WIDTH + 1];
+static cc_uint16 raster_to_color_y[CLASSICUBE_3D_HEIGHT + 1];
 #define SOFTFP_GROUPED_RASTER
 #endif
 #if defined CC_BUILD_SOFTFP_FAST_CUTOUT && defined CC_BUILD_SOFTFP_PERSPECTIVE4 && \
-    defined CC_BUILD_SOFTFP_W_DEPTH16 && defined CC_BUILD_SOFTFP_2X2_RASTER && \
+    defined CC_BUILD_SOFTFP_W_DEPTH8 && defined CC_BUILD_SOFTFP_LOWRES_RASTER && \
     defined CC_BUILD_SOFTFP_TEX16 && defined CC_BUILD_SOFTFP_FB16
 #define SOFTFP_FAST_TERRAIN_KERNEL
 #endif
@@ -191,19 +199,19 @@ static CC_INLINE SoftPixel AveragePixel565(SoftPixel a, SoftPixel b) {
 
 static CC_INLINE SoftPixel ApplyFog4(SoftPixel source, int inverseW,
                                      cc_uint32* fogPixels) {
-    SoftPixel half, quarter;
+    SoftPixel halfFog, quarterFog, eighthFog;
     if (!gfx_fogEnabled || inverseW >= fogWStart) return source;
     if (fogPixels) (*fogPixels)++;
 
-    half = AveragePixel565(source, fogPixel);
-    if (inverseW < fogWEnd) return half;
-
-    /* Preserve the existing fog distances while halving every blend level:
-     * 100/75/50/25% becomes 50/37.5/25/12.5%. */
-    quarter = AveragePixel565(source, half);
-    if (inverseW < fogWHalf) return AveragePixel565(quarter, half);
-    if (inverseW < fogWQuarter) return quarter;
-    return AveragePixel565(source, quarter);
+    /* Preserve the existing fog distances while halving the fog opacity
+     * again: the four stages now blend 6.25/12.5/18.75/25% fog. */
+    halfFog    = AveragePixel565(source, fogPixel);
+    quarterFog = AveragePixel565(source, halfFog);
+    eighthFog  = AveragePixel565(source, quarterFog);
+    if (inverseW < fogWEnd) return quarterFog;
+    if (inverseW < fogWHalf) return AveragePixel565(quarterFog, eighthFog);
+    if (inverseW < fogWQuarter) return eighthFog;
+    return AveragePixel565(source, eighthFog);
 }
 #ifdef CC_BUILD_SOFTFP_PIXEL_PROBES
 #define APPLY_FOG4(source, inverseW, counter) \
@@ -214,7 +222,7 @@ static CC_INLINE SoftPixel ApplyFog4(SoftPixel source, int inverseW,
 #endif
 #endif
 
-#if defined CC_BUILD_SOFTFP_Z16_TILES || defined CC_BUILD_SOFTFP_W_DEPTH16
+#ifdef CC_BUILD_SOFTFP_Z16_TILES
 static void FillDepth16(DepthValue* dst, DepthValue value, int count) {
     cc_uint32 pair = (cc_uint32)value | ((cc_uint32)value << 16);
     cc_uint32* out = (cc_uint32*)dst;
@@ -334,18 +342,29 @@ void Gfx_Create(void) {
     Gfx.Created      = true;
     Gfx.BackendType  = CC_GFX_BACKEND_SOFTGPU;
     Gfx.Limitations  = GFX_LIMIT_MINIMAL;
-#if defined CC_BUILD_ESP32S3 && defined CC_BUILD_SOFTFP_W_DEPTH16
-    /* Claim the full 160x120 Z16 block before component VBs can fragment the
-     * host's internal heap. Gfx_OnWindowResize reuses this reserved buffer. */
-    (void)holo_port_dma_buffer(
-        ((CLASSICUBE_RENDER_WIDTH  + 1) >> 1) *
-        ((CLASSICUBE_RENDER_HEIGHT + 1) >> 1), 2);
+#if defined CC_BUILD_ESP32S3 && defined CC_BUILD_SOFTFP_W_DEPTH8
+    /* Claim the preferred Z8 block before component VBs can fragment the
+     * internal heap. Fall back to 160x120 rather than placing depth in PSRAM. */
+    raster_width  = CLASSICUBE_3D_WIDTH;
+    raster_height = CLASSICUBE_3D_HEIGHT;
+    if (!holo_port_buffer(raster_width * raster_height * sizeof(DepthValue), 2)) {
+        Platform_LogConst("[cc.gfx] ERROR: 240x180 Z8 internal depth reserve failed (43200 bytes)");
+        raster_width  = CLASSICUBE_3D_FALLBACK_WIDTH;
+        raster_height = CLASSICUBE_3D_FALLBACK_HEIGHT;
+        if (!holo_port_buffer(raster_width * raster_height * sizeof(DepthValue), 2)) {
+            Platform_LogConst("[cc.gfx] ERROR: 160x120 Z8 internal fallback failed; PSRAM depth disabled");
+            Process_Abort2(ERR_OUT_OF_MEMORY, "allocating internal 3D depth buffer");
+            return;
+        }
+        holo_port_set_last_error("240x180 internal depth unavailable; using 160x120");
+        Platform_LogConst("[cc.gfx] raster fallback=160x120 internal; PSRAM depth disabled");
+    }
 #endif
 }
 
 static void DestroyBuffers(void) {
     Window_FreeFramebuffer(&fb_bmp);
-#ifdef CC_BUILD_SOFTFP_W_DEPTH16
+#ifdef CC_BUILD_SOFTFP_W_DEPTH8
     if (depthBuffer && !depthBufferInternal) Mem_Free(depthBuffer);
     depthBufferInternal = false;
     asyncPresenterClear = asyncDepthClear = false;
@@ -477,8 +496,8 @@ GfxResourceID Gfx_AllocTexture(struct Bitmap* bmp, int rowWidth, cc_uint8 flags,
 #ifdef CC_BUILD_SOFTFP_HOT_ATLAS
     if (!hotAtlasOwner && bmp->width == 16 && bmp->height >= 1024 &&
         bmp->width * bmp->height <= HOT_ATLAS_PIXELS) {
-        tex->hotPixels = (SoftTexel*)holo_port_dma_buffer(
-            (size_t)bmp->width * bmp->height, 2);
+        tex->hotPixels = (SoftTexel*)holo_port_buffer(
+            (size_t)bmp->width * bmp->height * sizeof(SoftTexel), 2);
         if (tex->hotPixels) {
             Mem_Copy(tex->hotPixels, tex->pixels,
                      (size_t)bmp->width * bmp->height * sizeof(SoftTexel));
@@ -591,7 +610,7 @@ static void ClearColorBuffer(void) {
     }
 }
 
-#if !defined CC_BUILD_SOFTFP_Z16_TILES && !defined CC_BUILD_SOFTFP_W_DEPTH16 && !defined CC_BUILD_SOFTFP_Z32_FASTCLEAR
+#if !defined CC_BUILD_SOFTFP_Z16_TILES && !defined CC_BUILD_SOFTFP_W_DEPTH8 && !defined CC_BUILD_SOFTFP_Z32_FASTCLEAR
 static void FillDepth32(DepthValue* dst, int count) {
     int i = 0;
     const DepthValue maxDepth = 0x7FFFFFFF;
@@ -627,8 +646,8 @@ static void ClearDepthBuffer(void) {
     } else {
         FillDepth16(depthBuffer, DEPTH_CLEAR_VALUE, db_stride * db_height);
     }
-#elif defined CC_BUILD_SOFTFP_W_DEPTH16
-    FillDepth16(depthBuffer, DEPTH_CLEAR_VALUE, db_stride * db_height);
+#elif defined CC_BUILD_SOFTFP_W_DEPTH8
+    Mem_Set(depthBuffer, DEPTH_CLEAR_VALUE, db_stride * db_height);
 #else
 #ifdef CC_BUILD_SOFTFP_Z32_FASTCLEAR
     Mem_Set(depthBuffer, 0xFF, db_stride * db_height * sizeof(DepthValue));
@@ -1177,22 +1196,20 @@ static cc_bool ViewportVertex3D(VertexFixed* vertex) {
     int64_t y_ndc = ((int64_t)vertex->y * invW) >> FP_SHIFT;
     int64_t z_ndc = ((int64_t)vertex->z * invW) >> FP_SHIFT;
     
-#ifdef CC_BUILD_SOFTFP_2X2_RASTER
-    /* Rasterise the 3D scene on a coherent 160x120 grid. The resulting pixel
-     * is expanded to 2x2 later, while 2D/UI rendering remains 320x240. */
-    int halfWidth  = vp_hwidth_fp  >> 1;
-    int halfHeight = vp_hheight_fp >> 1;
-    int64_t screen_x = halfWidth  + ((x_ndc * halfWidth)  >> FP_SHIFT);
-    int64_t screen_y = halfHeight - ((y_ndc * halfHeight) >> FP_SHIFT);
+#ifdef CC_BUILD_SOFTFP_LOWRES_RASTER
+    /* Rasterise only the 3D scene at the selected 4:3 resolution. Each sample
+     * is expanded through the precomputed map; 2D/UI stays native 320x240. */
+    int64_t screen_x = vp_raster_hwidth_fp  + ((x_ndc * vp_raster_hwidth_fp)  >> FP_SHIFT);
+    int64_t screen_y = vp_raster_hheight_fp - ((y_ndc * vp_raster_hheight_fp) >> FP_SHIFT);
 #else
     int64_t screen_x = vp_hwidth_fp  + ((x_ndc * vp_hwidth_fp)  >> FP_SHIFT);
     int64_t screen_y = vp_hheight_fp - ((y_ndc * vp_hheight_fp) >> FP_SHIFT);
 #endif
     
     // Clamp
-#ifdef CC_BUILD_SOFTFP_2X2_RASTER
-    if (screen_x < -((fb_width  >> 1) << FP_SHIFT) || screen_x > ((fb_width  >> 1) << (FP_SHIFT + 1))) return false;
-    if (screen_y < -((fb_height >> 1) << FP_SHIFT) || screen_y > ((fb_height >> 1) << (FP_SHIFT + 1))) return false;
+#ifdef CC_BUILD_SOFTFP_LOWRES_RASTER
+    if (screen_x < -(raster_width  << FP_SHIFT) || screen_x > (raster_width  << (FP_SHIFT + 1))) return false;
+    if (screen_y < -(raster_height << FP_SHIFT) || screen_y > (raster_height << (FP_SHIFT + 1))) return false;
 #else
     if (screen_x < -(fb_width  << FP_SHIFT) || screen_x > (fb_width  << (FP_SHIFT + 1))) return false;
     if (screen_y < -(fb_height << FP_SHIFT) || screen_y > (fb_height << (FP_SHIFT + 1))) return false;
@@ -1475,25 +1492,53 @@ static CC_INLINE SoftPixel BlendSoftPixel(int srcR, int srcG, int srcB,
 }
 
 #ifdef SOFTFP_GROUPED_RASTER
-static CC_INLINE void StoreRasterGroup(int cb_index, SoftPixel color) {
-    cc_uint32 pair = (cc_uint32)color | ((cc_uint32)color << 16);
-    cc_uint32* top = (cc_uint32*)&colorBuffer[cb_index];
-    cc_uint32* bot = (cc_uint32*)&colorBuffer[cb_index + cb_stride];
-    *top = pair;
-    *bot = pair;
+static CC_INLINE void StoreRasterGroup(int rasterX, int rasterY, SoftPixel color) {
+    int colorX0 = raster_to_color_x[rasterX];
+    int colorX1 = raster_to_color_x[rasterX + 1];
+    int colorY0 = raster_to_color_y[rasterY];
+    int colorY1 = raster_to_color_y[rasterY + 1];
+    int x, y;
+
+    for (y = colorY0; y < colorY1; y++) {
+        SoftPixel* dst = colorBuffer + y * cb_stride;
+        for (x = colorX0; x < colorX1; x++) dst[x] = color;
+    }
 }
 
-static CC_INLINE void BlendRasterGroup(int cb_index,
+static CC_INLINE void BlendRasterGroup(int rasterX, int rasterY,
                                        int srcR, int srcG, int srcB, int srcA) {
-    colorBuffer[cb_index] = BlendSoftPixel(
-        srcR, srcG, srcB, srcA, colorBuffer[cb_index]);
-    colorBuffer[cb_index + 1] = BlendSoftPixel(
-        srcR, srcG, srcB, srcA, colorBuffer[cb_index + 1]);
-    cb_index += cb_stride;
-    colorBuffer[cb_index] = BlendSoftPixel(
-        srcR, srcG, srcB, srcA, colorBuffer[cb_index]);
-    colorBuffer[cb_index + 1] = BlendSoftPixel(
-        srcR, srcG, srcB, srcA, colorBuffer[cb_index + 1]);
+    int colorX0 = raster_to_color_x[rasterX];
+    int colorX1 = raster_to_color_x[rasterX + 1];
+    int colorY0 = raster_to_color_y[rasterY];
+    int colorY1 = raster_to_color_y[rasterY + 1];
+    int x, y;
+
+    for (y = colorY0; y < colorY1; y++) {
+        SoftPixel* dst = colorBuffer + y * cb_stride;
+        for (x = colorX0; x < colorX1; x++) {
+            dst[x] = BlendSoftPixel(srcR, srcG, srcB, srcA, dst[x]);
+        }
+    }
+}
+#endif
+
+#ifdef CC_BUILD_SOFTFP_W_DEPTH8
+static CC_INLINE DepthValue EncodeWDepth8(int inverseW) {
+    cc_uint32 scaled = (cc_uint32)inverseW >> 8;
+    cc_uint32 quantised;
+
+    /* Keep one-code-per-step reciprocal precision from infinity through two
+     * blocks, then use a five-bit mantissa so nearby geometry does not all
+     * collapse into the same Z8 value. Larger inverse-W remains nearer. */
+    if (scaled <= 127u) {
+        quantised = scaled;
+    } else {
+        int exponent = 31 - __builtin_clz(scaled);
+        cc_uint32 mantissa = (scaled - (1u << exponent)) >> (exponent - 5);
+        quantised = 128u + (cc_uint32)(exponent - 7) * 32u + mantissa;
+        if (quantised > DEPTH_CLEAR_VALUE) quantised = DEPTH_CLEAR_VALUE;
+    }
+    return (DepthValue)(DEPTH_CLEAR_VALUE - quantised);
 }
 #endif
 
@@ -1529,7 +1574,8 @@ static CC_NOINLINE void DrawTriangleFastTerrain(VertexFixed* V0, VertexFixed* V1
     int minY = FixedToInt(min(y0_fp, min(y1_fp, y2_fp)));
     int maxX = FixedToInt(max(x0_fp, max(x1_fp, x2_fp)));
     int maxY = FixedToInt(max(y0_fp, max(y1_fp, y2_fp)));
-    int rasterMaxX = fb_maxX >> 1, rasterMaxY = fb_maxY >> 1;
+    int rasterMaxX = (fb_maxX * raster_width) / fb_width;
+    int rasterMaxY = (fb_maxY * raster_height) / fb_height;
     int w0 = V0->w, w1 = V1->w, w2 = V2->w;
     int u0, v0, u1, v1, u2, v2;
     int dx01, dy01, dx12, dy12, dx20, dy20;
@@ -1617,7 +1663,6 @@ static CC_NOINLINE void DrawTriangleFastTerrain(VertexFixed* V0, VertexFixed* V1
         int reciprocalEnd = 0, perspectiveRemain = 0;
         cc_bool perspectiveValid = false;
         DepthValue* fastDepth;
-        int fastCbIndex;
 
         if (!ClipSpanEdge(rowIc0, step_ic0_per_x, &spanLower, &spanUpper) ||
             !ClipSpanEdge(rowIc1, step_ic1_per_x, &spanLower, &spanUpper) ||
@@ -1639,21 +1684,18 @@ static CC_NOINLINE void DrawTriangleFastTerrain(VertexFixed* V0, VertexFixed* V1
         v_interp = FixedMul(ic0, v0) + FixedMul(ic1, v1) + FixedMul(ic2, v2);
 
         fastDepth = depthBuffer + y * db_stride + spanMinX;
-        fastCbIndex = (y << 1) * cb_stride + (spanMinX << 1);
 
-        for (x = spanMinX; x <= spanMaxX;
-             x++, fastDepth++, fastCbIndex += 2) {
+        for (x = spanMinX; x <= spanMaxX; x++, fastDepth++) {
             DepthValue fastZ;
 
             if (w_interp <= 0) goto next_split_terrain_pixel;
             {
-                cc_uint32 inverseDepth = (cc_uint32)w_interp >> 4;
                 int fastU, fastV;
                 int fastTexX, fastTexY;
                 SoftTexel fastTexel;
                 SoftPixel fastColor;
 
-                fastZ = (DepthValue)(DEPTH_CLEAR_VALUE - inverseDepth);
+                fastZ = EncodeWDepth8(w_interp);
                 if (fastZ > *fastDepth) goto next_split_terrain_pixel;
 
                 /* Defer perspective span setup until after the depth test.
@@ -1718,7 +1760,7 @@ static CC_NOINLINE void DrawTriangleFastTerrain(VertexFixed* V0, VertexFixed* V1
 #ifdef CC_BUILD_SOFTFP_FOG4
                 fastColor = APPLY_FOG4(fastColor, w_interp, fogPixelsLocal);
 #endif
-                StoreRasterGroup(fastCbIndex, fastColor);
+                StoreRasterGroup(x, y, fastColor);
 #ifdef CC_BUILD_SOFTFP_PIXEL_PROBES
                 fastCutoutPixelsLocal++;
 #endif
@@ -1758,8 +1800,9 @@ static void DrawTriangle3DGeneric(VertexFixed* V0, VertexFixed* V1,
     int maxX = FixedToInt(max(x0_fp, max(x1_fp, x2_fp)));
     int maxY = FixedToInt(max(y0_fp, max(y1_fp, y2_fp)));
     int factor, x, y;
-#ifdef CC_BUILD_SOFTFP_2X2_RASTER
-    int rasterMaxX = fb_maxX >> 1, rasterMaxY = fb_maxY >> 1;
+#ifdef CC_BUILD_SOFTFP_LOWRES_RASTER
+    int rasterMaxX = (fb_maxX * raster_width) / fb_width;
+    int rasterMaxY = (fb_maxY * raster_height) / fb_height;
 #else
     int rasterMaxX = fb_maxX, rasterMaxY = fb_maxY;
 #endif
@@ -1957,7 +2000,7 @@ static void DrawTriangle3DGeneric(VertexFixed* V0, VertexFixed* V1,
             DepthValue z;
             int depthX = 0;
 #else
-#if defined CC_BUILD_SOFTFP_Z32_FASTCLEAR || defined CC_BUILD_SOFTFP_W_DEPTH16
+#if defined CC_BUILD_SOFTFP_Z32_FASTCLEAR || defined CC_BUILD_SOFTFP_W_DEPTH8
             DepthValue z;
 #ifdef CC_BUILD_SOFTFP_Z32_FASTCLEAR
             int zSigned, db_index = y * db_stride + x;
@@ -1965,11 +2008,7 @@ static void DrawTriangle3DGeneric(VertexFixed* V0, VertexFixed* V1,
             int db_index = y * db_stride + x;
 #endif
 #else
-#ifdef CC_BUILD_SOFTFP_2X2_RASTER
             int z, db_index = y * db_stride + x;
-#else
-            int z, db_index = y * db_stride + x;
-#endif
 #endif
 #endif
 
@@ -2047,15 +2086,8 @@ static void DrawTriangle3DGeneric(VertexFixed* V0, VertexFixed* V1,
             depthX = x & depthXMask;
             if (depthTest && z > depthRow[depthX]) goto next_pixel_3d;
 #else
-#ifdef CC_BUILD_SOFTFP_W_DEPTH16
-            /* Quantised reciprocal-W keeps the same ordering as the proven
-             * Z32 path. At a 0.1 near plane, shifting by four covers the full
-             * useful range while retaining ample precision at view distance. */
-            {
-                cc_uint32 inverseDepth = (cc_uint32)w_interp >> 4;
-                if (inverseDepth > DEPTH_CLEAR_VALUE) inverseDepth = DEPTH_CLEAR_VALUE;
-                z = (DepthValue)(DEPTH_CLEAR_VALUE - inverseDepth);
-            }
+#ifdef CC_BUILD_SOFTFP_W_DEPTH8
+            z = EncodeWDepth8(w_interp);
 #elif defined CC_BUILD_SOFTFP_W_DEPTH
             /* For this perspective projection, interpolated 1/W is strictly
              * monotonic with camera depth. Invert it so the existing smaller-
@@ -2086,22 +2118,19 @@ static void DrawTriangle3DGeneric(VertexFixed* V0, VertexFixed* V1,
                 int fastTexX = FixedToInt(fastU) & texWidthMask;
                 int fastTexY = FixedToInt(fastV) & texHeightMask;
                 SoftTexel fastTexel = curTexPixels[fastTexY * curTexWidth + fastTexX];
-                int fastCbIndex;
+#ifndef SOFTFP_GROUPED_RASTER
+                int fastCbIndex = y * cb_stride + x;
+#endif
 
                 if (!(fastTexel & SOFT_TEXEL_A_MASK)) goto next_pixel_3d;
                 depthBuffer[db_index] = z;
-#ifdef CC_BUILD_SOFTFP_2X2_RASTER
-                fastCbIndex = (y << 1) * cb_stride + (x << 1);
-#else
-                fastCbIndex = y * cb_stride + x;
-#endif
 #ifdef SOFTFP_GROUPED_RASTER
                 {
                     SoftPixel fastColor = SoftPixel_FromTexelTint(fastTexel, r1, g1, b1);
 #ifdef CC_BUILD_SOFTFP_FOG4
                     fastColor = APPLY_FOG4(fastColor, w_interp, fogPixelsLocal);
 #endif
-                    StoreRasterGroup(fastCbIndex, fastColor);
+                    StoreRasterGroup(x, y, fastColor);
                 }
 #else
                 {
@@ -2132,9 +2161,7 @@ static void DrawTriangle3DGeneric(VertexFixed* V0, VertexFixed* V1,
 
             {
                 int Rloc = R, Gloc = G, Bloc = B, Aloc = A;
-#ifdef CC_BUILD_SOFTFP_2X2_RASTER
-                int cb_index = (y << 1) * cb_stride + (x << 1);
-#else
+#ifndef SOFTFP_GROUPED_RASTER
                 int cb_index = y * cb_stride + x;
 #endif
                 if (texturing) {
@@ -2185,7 +2212,7 @@ static void DrawTriangle3DGeneric(VertexFixed* V0, VertexFixed* V1,
 #ifdef CC_BUILD_SOFTFP_TEXEL_2X2
                         if (!texelReused) lastOpaquePixel = SoftPixel_FromTexelTint(tColor, r1, g1, b1);
 #ifdef SOFTFP_GROUPED_RASTER
-                        StoreRasterGroup(cb_index, lastOpaquePixel);
+                        StoreRasterGroup(x, y, lastOpaquePixel);
 #else
                         colorBuffer[cb_index] = lastOpaquePixel;
 #endif
@@ -2193,7 +2220,7 @@ static void DrawTriangle3DGeneric(VertexFixed* V0, VertexFixed* V1,
 #ifdef SOFTFP_GROUPED_RASTER
                         {
                             SoftPixel opaque = SoftPixel_FromTexelTint(tColor, r1, g1, b1);
-                            StoreRasterGroup(cb_index, opaque);
+                            StoreRasterGroup(x, y, opaque);
                         }
 #else
                         colorBuffer[cb_index] = SoftPixel_FromTexelTint(tColor, r1, g1, b1);
@@ -2222,13 +2249,13 @@ static void DrawTriangle3DGeneric(VertexFixed* V0, VertexFixed* V1,
                 if (!gfx_alphaBlend) {
 #ifdef SOFTFP_GROUPED_RASTER
                     SoftPixel opaque = SoftPixel_Make(Rloc, Gloc, Bloc);
-                    StoreRasterGroup(cb_index, opaque);
+                    StoreRasterGroup(x, y, opaque);
 #else
                     colorBuffer[cb_index] = SoftPixel_Make(Rloc, Gloc, Bloc);
 #endif
                 } else {
 #ifdef SOFTFP_GROUPED_RASTER
-                    BlendRasterGroup(cb_index, Rloc, Gloc, Bloc, Aloc);
+                    BlendRasterGroup(x, y, Rloc, Gloc, Bloc, Aloc);
 #else
                     colorBuffer[cb_index] = BlendSoftPixel(
                         Rloc, Gloc, Bloc, Aloc, colorBuffer[cb_index]);
@@ -2737,7 +2764,7 @@ void Gfx_EndFrame(void) {
     }
 #endif
     Window_DrawFramebuffer(r, &fb_bmp);
-#if defined CC_BUILD_SOFTFP_ASYNC_CLEAR && !defined CC_BUILD_SOFTFP_Z16_TILES && !defined CC_BUILD_SOFTFP_W_DEPTH16 && !defined CC_BUILD_SOFTFP_Z32_FASTCLEAR
+#if defined CC_BUILD_SOFTFP_ASYNC_CLEAR && !defined CC_BUILD_SOFTFP_Z16_TILES && !defined CC_BUILD_SOFTFP_W_DEPTH8 && !defined CC_BUILD_SOFTFP_Z32_FASTCLEAR
     if (asyncDepthClear) {
         depthBufferIndex ^= 1u;
         depthBuffer = depthBuffers[depthBufferIndex];
@@ -2766,27 +2793,41 @@ void Gfx_OnWindowResize(int width, int height) {
 #ifdef CC_BUILD_SOFTFP_HOT_ATLAS
     /* Reserve the contiguous atlas store before the Core 0 presenter stack
      * and DMA blocks fragment internal RAM. The atlas is populated later. */
-    (void)holo_port_dma_buffer(HOT_ATLAS_PIXELS, 2);
+    (void)holo_port_buffer(HOT_ATLAS_PIXELS * sizeof(SoftTexel), 2);
 #endif
     Window_AllocFramebuffer(&fb_bmp, width, height);
     colorBuffer = (SoftPixel*)fb_bmp.scan0;
     cb_stride   = fb_bmp.width;
 
-#ifdef CC_BUILD_SOFTFP_2X2_RASTER
-    db_stride = (width  + 1) >> 1;
-    db_height = (height + 1) >> 1;
+#ifdef CC_BUILD_SOFTFP_LOWRES_RASTER
+    int i;
+    db_stride = raster_width;
+    db_height = raster_height;
+    for (i = 0; i <= raster_width; i++) {
+        raster_to_color_x[i] = (cc_uint16)((i * width) / raster_width);
+    }
+    for (i = 0; i <= raster_height; i++) {
+        raster_to_color_y[i] = (cc_uint16)((i * height) / raster_height);
+    }
 #else
     db_stride = width;
     db_height = height;
 #endif
 
-#ifdef CC_BUILD_SOFTFP_W_DEPTH16
-    depthBuffer = (DepthValue*)holo_port_dma_buffer(db_stride * db_height, 2);
+#ifdef CC_BUILD_SOFTFP_W_DEPTH8
+    depthBuffer = (DepthValue*)holo_port_buffer(
+        db_stride * db_height * sizeof(DepthValue), 2);
     depthBufferInternal = depthBuffer != NULL;
     if (!depthBuffer) {
+#ifdef CC_BUILD_ESP32S3
+        Platform_LogConst("[cc.gfx] ERROR: internal depth buffer unavailable; PSRAM depth disabled");
+        Process_Abort2(ERR_OUT_OF_MEMORY, "allocating internal 3D depth buffer");
+        return;
+#else
         depthBuffer = Mem_Alloc(db_stride * db_height, sizeof(DepthValue), "depth buffer");
+#endif
     }
-    FillDepth16(depthBuffer, DEPTH_CLEAR_VALUE, db_stride * db_height);
+    Mem_Set(depthBuffer, DEPTH_CLEAR_VALUE, db_stride * db_height);
     asyncPresenterClear = holo_port_presenter_async_available();
     asyncDepthClear = false;
 #elif defined CC_BUILD_SOFTFP_ASYNC_CLEAR && !defined CC_BUILD_SOFTFP_Z16_TILES && !defined CC_BUILD_SOFTFP_Z32_FASTCLEAR
@@ -2807,8 +2848,8 @@ void Gfx_OnWindowResize(int width, int height) {
     depthBuffer = Mem_Alloc(db_stride * db_height, sizeof(DepthValue), "depth buffer");
 #endif
 #ifdef CC_BUILD_SOFTFP_Z16_TILES
-    depthCachePixels = (DepthValue*)holo_port_dma_buffer(
-        DEPTH_CACHE_LINES * DEPTH_TILE_PIXELS, 2);
+    depthCachePixels = (DepthValue*)holo_port_buffer(
+        DEPTH_CACHE_LINES * DEPTH_TILE_PIXELS * sizeof(DepthValue), 2);
     DepthCacheReset();
     if (depthCachePixels) {
         Platform_LogConst("[cc.gfx] depth=Z16 ndc tile=16x16 cache=64 internal=32768");
@@ -2820,11 +2861,15 @@ void Gfx_OnWindowResize(int width, int height) {
 #else
     Platform_LogConst("[cc.gfx] texture=affine A1RGB555 framebuffer=RGB565 alpha=fixed50 extras=off");
 #endif
-#elif defined CC_BUILD_SOFTFP_W_DEPTH16
+#elif defined CC_BUILD_SOFTFP_W_DEPTH8
     if (depthBufferInternal) {
-        Platform_LogConst("[cc.gfx] depth=reciprocal-W Z16 linear internal=38400");
+        if (raster_width == CLASSICUBE_3D_WIDTH) {
+            Platform_LogConst("[cc.gfx] depth=reciprocal-W Z8 hybrid-linear-log internal=43200");
+        } else {
+            Platform_LogConst("[cc.gfx] depth=reciprocal-W Z8 hybrid-linear-log internal=19200");
+        }
     } else {
-        Platform_LogConst("[cc.gfx] depth=reciprocal-W Z16 linear PSRAM fallback");
+        Platform_LogConst("[cc.gfx] depth=reciprocal-W Z8 PSRAM fallback");
     }
 #ifdef CC_BUILD_SOFTFP_PERSPECTIVE4
     Platform_LogConst("[cc.gfx] texture=perspective-correct/4 A1RGB555 framebuffer=RGB565 alpha=fixed50 extras=off");
@@ -2858,18 +2903,22 @@ void Gfx_OnWindowResize(int width, int height) {
     Platform_LogConst("[cc.gfx] texture=affine A1RGB555 framebuffer=RGB565 alpha=fixed50 extras=off");
 #endif
 #endif
-#ifdef CC_BUILD_SOFTFP_2X2_RASTER
-#ifdef CC_BUILD_SOFTFP_W_DEPTH16
-    Platform_LogConst("[cc.gfx] raster=3D-160x120 Z16 scale2x UI=320x240");
+#ifdef CC_BUILD_SOFTFP_LOWRES_RASTER
+#ifdef CC_BUILD_SOFTFP_W_DEPTH8
+    if (raster_width == CLASSICUBE_3D_WIDTH) {
+        Platform_LogConst("[cc.gfx] raster=3D-240x180 Z8 scale4/3 UI=320x240");
+    } else {
+        Platform_LogConst("[cc.gfx] raster=3D-160x120 Z8 scale2x UI=320x240");
+    }
 #else
-    Platform_LogConst("[cc.gfx] raster=3D-160x120 Z32 scale2x UI=320x240");
+    Platform_LogConst("[cc.gfx] raster=3D-lowres Z32 scaled UI=320x240");
 #endif
 #endif
 #ifdef CC_BUILD_SOFTFP_QUAD_FRUSTUM_CULL
     Platform_LogConst("[cc.gfx] frontend=map-only diagonal-AABB frustum cull");
 #endif
 #ifdef CC_BUILD_SOFTFP_FOG4
-    Platform_LogConst("[cc.gfx] fog=4-level half-strength");
+    Platform_LogConst("[cc.gfx] fog=4-level quarter-strength");
 #endif
 #ifdef CC_BUILD_ESP32S3
 #ifdef CC_BUILD_SOFTFP_PIXEL_PROBES
@@ -2886,6 +2935,10 @@ void Gfx_OnWindowResize(int width, int height) {
 void Gfx_SetViewport(int x, int y, int w, int h) {
     vp_hwidth_fp  = FloatToFixed(w / 2.0f);
     vp_hheight_fp = FloatToFixed(h / 2.0f);
+#ifdef CC_BUILD_SOFTFP_LOWRES_RASTER
+    vp_raster_hwidth_fp = (int)(((int64_t)vp_hwidth_fp * raster_width) / fb_width);
+    vp_raster_hheight_fp = (int)(((int64_t)vp_hheight_fp * raster_height) / fb_height);
+#endif
 }
 
 void Gfx_SetScissor (int x, int y, int w, int h) {
