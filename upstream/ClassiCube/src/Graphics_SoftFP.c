@@ -780,21 +780,49 @@ struct FPVertexTextured {
 };
 
 #if defined CC_BUILD_ESP32S3 && defined CC_BUILD_SOFTFP_QUAD_FRUSTUM_CULL
+/* Map vertices are immutable after chunk construction. Store positions in
+ * chunk-local Q8, repeating U in Q12, normalised V in Q16, and tint in RGB565.
+ * This is exactly 12 bytes instead of the generic fixed-point vertex's 24. */
+typedef struct PackedTerrainVertex {
+    cc_int16 x, y, z;
+    cc_uint16 u, v;
+    cc_uint16 color;
+} PackedTerrainVertex;
+typedef char PackedTerrainVertex_SizeCheck[sizeof(PackedTerrainVertex) == 12 ? 1 : -1];
+
 typedef struct SoftFPMapQuadBounds {
     cc_uint8 minX, minY, minZ;
     cc_uint8 maxX, maxY, maxZ;
 } SoftFPMapQuadBounds;
 static const SoftFPMapQuadBounds* gfx_mapCullBounds;
 static SoftFPClipPlane mapCullLocalPlanes[NUM_PLANES];
+static int gfx_map_origin_x, gfx_map_origin_y, gfx_map_origin_z;
+
+static CC_INLINE cc_uint16 SoftFP_PackTerrainColor(PackedCol color) {
+    return (cc_uint16)(((PackedCol_R(color) & 0xF8) << 8) |
+                       ((PackedCol_G(color) & 0xFC) << 3) |
+                        (PackedCol_B(color) >> 3));
+}
+
+static CC_INLINE PackedCol SoftFP_UnpackTerrainColor(cc_uint16 color) {
+    int r5 = (color >> 11) & 0x1F;
+    int g6 = (color >>  5) & 0x3F;
+    int b5 =  color        & 0x1F;
+    return PackedCol_Make((r5 << 3) | (r5 >> 2),
+                          (g6 << 2) | (g6 >> 4),
+                          (b5 << 3) | (b5 >> 2), 0xFF);
+}
 
 void* Gfx_CreateMapCullBounds(GfxResourceID vb, int verticesCount,
                               int originX, int originY, int originZ) {
-    const struct FPVertexTextured* src = (const struct FPVertexTextured*)vb;
+    const PackedTerrainVertex* src = (const PackedTerrainVertex*)vb;
     SoftFPMapQuadBounds* bounds;
     int quadCount = verticesCount >> 2;
-    const int quantStep = FP_ONE >> 3;
+    const int quantStep = 256 >> 3;
     cc_uint32 bytes;
     int i;
+
+    (void)originX; (void)originY; (void)originZ;
 
     if (!src || quadCount <= 0) return NULL;
     bytes = (cc_uint32)quadCount * (cc_uint32)sizeof(*bounds);
@@ -812,29 +840,23 @@ void* Gfx_CreateMapCullBounds(GfxResourceID vb, int verticesCount,
         int minX = min(src[0].x, src[2].x), maxX = max(src[0].x, src[2].x);
         int minY = min(src[0].y, src[2].y), maxY = max(src[0].y, src[2].y);
         int minZ = min(src[0].z, src[2].z), maxZ = max(src[0].z, src[2].z);
-        int64_t localMinX = (int64_t)minX - ((int64_t)originX << FP_SHIFT);
-        int64_t localMaxX = (int64_t)maxX - ((int64_t)originX << FP_SHIFT);
-        int64_t localMinY = (int64_t)minY - ((int64_t)originY << FP_SHIFT);
-        int64_t localMaxY = (int64_t)maxY - ((int64_t)originY << FP_SHIFT);
-        int64_t localMinZ = (int64_t)minZ - ((int64_t)originZ << FP_SHIFT);
-        int64_t localMaxZ = (int64_t)maxZ - ((int64_t)originZ << FP_SHIFT);
         int qMinX, qMaxX, qMinY, qMaxY, qMinZ, qMaxZ;
 
         /* Chunk geometry must stay inside its 16^3 local cube. Reject an
          * unusual buffer as a whole and retain the vertex-derived fallback. */
-        if (localMinX < 0 || localMaxX > (16LL << FP_SHIFT) ||
-            localMinY < 0 || localMaxY > (16LL << FP_SHIFT) ||
-            localMinZ < 0 || localMaxZ > (16LL << FP_SHIFT)) {
+        if (minX < 0 || maxX > 16 * 256 ||
+            minY < 0 || maxY > 16 * 256 ||
+            minZ < 0 || maxZ > 16 * 256) {
             if (!holo_port_hot_vb_free(bounds)) Mem_Free(bounds);
             return NULL;
         }
 
-        qMinX = (int)(localMinX / quantStep);
-        qMaxX = (int)((localMaxX + quantStep - 1) / quantStep);
-        qMinY = (int)(localMinY / quantStep);
-        qMaxY = (int)((localMaxY + quantStep - 1) / quantStep);
-        qMinZ = (int)(localMinZ / quantStep);
-        qMaxZ = (int)((localMaxZ + quantStep - 1) / quantStep);
+        qMinX = minX / quantStep;
+        qMaxX = (maxX + quantStep - 1) / quantStep;
+        qMinY = minY / quantStep;
+        qMaxY = (maxY + quantStep - 1) / quantStep;
+        qMinZ = minZ / quantStep;
+        qMaxZ = (maxZ + quantStep - 1) / quantStep;
         bounds[i].minX = (cc_uint8)qMinX; bounds[i].maxX = (cc_uint8)qMaxX;
         bounds[i].minY = (cc_uint8)qMinY; bounds[i].maxY = (cc_uint8)qMaxY;
         bounds[i].minZ = (cc_uint8)qMinZ; bounds[i].maxZ = (cc_uint8)qMaxZ;
@@ -852,6 +874,9 @@ void Gfx_DeleteMapCullBounds(void** bounds) {
 void Gfx_BindMapCullBounds(void* bounds, int originX, int originY, int originZ) {
     cc_uint8 planes;
     gfx_mapCullBounds = (const SoftFPMapQuadBounds*)bounds;
+    gfx_map_origin_x = originX;
+    gfx_map_origin_y = originY;
+    gfx_map_origin_z = originZ;
     if (!bounds) return;
 
     /* Convert world-space clip planes to the packed chunk-local 1/8 grid
@@ -901,6 +926,50 @@ static void PreprocessColouredVertices(void* vertices) {
 		dst->c = src->Col;
 	}
 }
+
+#if defined CC_BUILD_ESP32S3 && defined CC_BUILD_SOFTFP_QUAD_FRUSTUM_CULL
+void Gfx_PackMapVb(GfxResourceID* vb, int verticesCount,
+                   int originX, int originY, int originZ) {
+    struct FPVertexTextured* src;
+    PackedTerrainVertex* dst;
+    GfxResourceID compact;
+    int originXFixed = originX * FP_ONE;
+    int originYFixed = originY * FP_ONE;
+    int originZFixed = originZ * FP_ONE;
+    int i;
+
+    if (!vb || !*vb || verticesCount <= 0) return;
+    src = (struct FPVertexTextured*)*vb;
+    dst = (PackedTerrainVertex*)*vb;
+
+    /* Destination elements are half the source size, therefore forward
+     * in-place conversion never overwrites a source vertex not yet read. */
+    for (i = 0; i < verticesCount; i++) {
+        int localX = src[i].x - originXFixed;
+        int localY = src[i].y - originYFixed;
+        int localZ = src[i].z - originZFixed;
+        int u = src[i].u >> 4;
+        int v = src[i].v;
+
+        Math_Clamp(u, 0, 0xFFFF);
+        Math_Clamp(v, 0, 0xFFFF);
+
+        dst[i].x = (cc_int16)(localX / 256);
+        dst[i].y = (cc_int16)(localY / 256);
+        dst[i].z = (cc_int16)(localZ / 256);
+        dst[i].u = (cc_uint16)u;
+        dst[i].v = (cc_uint16)v;
+        dst[i].color = SoftFP_PackTerrainColor(src[i].c);
+    }
+
+    /* Shrinking can temporarily fail under extreme fragmentation. The old
+     * allocation is still valid and already contains the packed stream, so
+     * rendering remains correct even when this particular chunk saves no RAM. */
+    compact = Mem_TryRealloc(*vb, (cc_uint32)verticesCount,
+                             (cc_uint32)sizeof(PackedTerrainVertex));
+    if (compact) *vb = compact;
+}
+#endif
 
 static GfxResourceID Gfx_AllocStaticVb(VertexFormat fmt, int count) {
     return Mem_TryAlloc(count, strideSizes[fmt]);
@@ -1162,8 +1231,8 @@ static void TransformVertex2D(int index, VertexFixed* vertex) {
  * this for dynamic/model quads: camera-facing rectangles can have a diagonal
  * whose component-wise bounds do not contain their other two vertices. */
 static CC_NOINLINE cc_bool SoftFP_MapQuadOutsideFrustum(int firstVertex, cc_uint8 planeMask) {
-    const struct FPVertexTextured* src =
-        (const struct FPVertexTextured*)gfx_vertices + firstVertex;
+    const PackedTerrainVertex* src =
+        (const PackedTerrainVertex*)gfx_vertices + firstVertex;
     float minXf, minYf, minZf, maxXf, maxYf, maxZf;
     int i;
 
@@ -1188,15 +1257,14 @@ static CC_NOINLINE cc_bool SoftFP_MapQuadOutsideFrustum(int firstVertex, cc_uint
         int minX = min(src[0].x, src[2].x), maxX = max(src[0].x, src[2].x);
         int minY = min(src[0].y, src[2].y), maxY = max(src[0].y, src[2].y);
         int minZ = min(src[0].z, src[2].z), maxZ = max(src[0].z, src[2].z);
-        const float fpScale = 1.0f / (float)FP_ONE;
+        const float q8Scale = 1.0f / 256.0f;
 
-        /* Preserve the original overflow fallback for malformed/extreme vertices. */
-        if (minX < -(1 << 28) || maxX > (1 << 28) ||
-            minY < -(1 << 28) || maxY > (1 << 28) ||
-            minZ < -(1 << 28) || maxZ > (1 << 28)) return false;
-        minXf = minX * fpScale; maxXf = maxX * fpScale;
-        minYf = minY * fpScale; maxYf = maxY * fpScale;
-        minZf = minZ * fpScale; maxZf = maxZ * fpScale;
+        minXf = gfx_map_origin_x + minX * q8Scale;
+        maxXf = gfx_map_origin_x + maxX * q8Scale;
+        minYf = gfx_map_origin_y + minY * q8Scale;
+        maxYf = gfx_map_origin_y + maxY * q8Scale;
+        minZf = gfx_map_origin_z + minZ * q8Scale;
+        maxZf = gfx_map_origin_z + maxZ * q8Scale;
     }
 
     /* The margin covers different float grouping versus the original
@@ -1219,11 +1287,23 @@ static CC_NOINLINE cc_bool SoftFP_MapQuadOutsideFrustum(int firstVertex, cc_uint
 }
 #endif
 
-static int TransformVertex3D(int index, VertexFixed* vertex) {
+static int TransformVertex3D(int index, VertexFixed* vertex, cc_bool packedMap) {
     int pos_x, pos_y, pos_z;
     struct FPVertexColoured* v_col;
     struct FPVertexTextured* v_tex;
-    
+
+#if defined CC_BUILD_ESP32S3 && defined CC_BUILD_SOFTFP_QUAD_FRUSTUM_CULL
+    if (packedMap) {
+        const PackedTerrainVertex* packed =
+            (const PackedTerrainVertex*)gfx_vertices + index;
+        vertex->x = gfx_map_origin_x * FP_ONE + packed->x * 256;
+        vertex->y = gfx_map_origin_y * FP_ONE + packed->y * 256;
+        vertex->z = gfx_map_origin_z * FP_ONE + packed->z * 256;
+        vertex->u = ((int)packed->u << 4) + (tex_offseting ? texOffsetX_fp : 0);
+        vertex->v = (int)packed->v + (tex_offseting ? texOffsetY_fp : 0);
+        vertex->c = SoftFP_UnpackTerrainColor(packed->color);
+    } else
+#endif
     if (gfx_format != VERTEX_FORMAT_TEXTURED) {
         v_col = (struct FPVertexColoured*)gfx_vertices + index;
         vertex->x = v_col->x;
@@ -3211,7 +3291,9 @@ void DrawQuadsFixed(int startVertex, int verticesCount, DrawHints hints) {
 			clipPlaneMask = (hints & DRAW_HINT_NOCLIP) ? 0u : mapClipPlanes;
 		}
 #endif
-		if (tex_offseting) ShiftTextureCoords(verticesCount);
+		/* Packed map buffers are immutable; their U/V offset is applied while
+		 * decoding each vertex instead of rewriting the compressed stream. */
+		if (tex_offseting && !optimizeMap) ShiftTextureCoords(verticesCount);
 
         for (i = 0; i < verticesCount / 4; i++, j += 4) {
 #ifdef CC_BUILD_SOFTFP_QUAD_FRUSTUM_CULL
@@ -3223,15 +3305,15 @@ void DrawQuadsFixed(int startVertex, int verticesCount, DrawHints hints) {
                 continue;
             }
 #endif
-            TransformVertex3D(j + 0, &vertices[0]);
-            TransformVertex3D(j + 1, &vertices[1]);
-            TransformVertex3D(j + 2, &vertices[2]);
-            TransformVertex3D(j + 3, &vertices[3]);
+            TransformVertex3D(j + 0, &vertices[0], optimizeMap);
+            TransformVertex3D(j + 1, &vertices[1], optimizeMap);
+            TransformVertex3D(j + 2, &vertices[2], optimizeMap);
+            TransformVertex3D(j + 3, &vertices[3], optimizeMap);
             
             DrawClippedFixed(vertices, clipPlaneMask, optimizeMap);
         }
 
-		if (tex_offseting) UnshiftTextureCoords(verticesCount);
+		if (tex_offseting && !optimizeMap) UnshiftTextureCoords(verticesCount);
     }
 #ifdef CC_BUILD_ESP32S3
 #ifdef CC_BUILD_SOFTFP_QUAD_FRUSTUM_CULL

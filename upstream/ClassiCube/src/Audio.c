@@ -145,6 +145,18 @@ static void Soundboard_Load(struct Soundboard* board, const cc_string* boardName
 	}
 
 	snd = &group->sounds[group->count];
+	/* The bundled step_ WAVs are byte-for-byte copies of the corresponding
+	 * dig_ WAVs. They are listed after dig_ entries in the archive, so retain
+	 * the original group/order mapping while sharing the already decoded PCM. */
+	if (board == &stepBoard) {
+		int groupIndex = (int)(group - board->groups);
+		struct SoundGroup* source = &digBoard.groups[groupIndex];
+		if (source->count > group->count) {
+			*snd = source->sounds[group->count];
+			group->count++;
+			return;
+		}
+	}
 	res = Sound_ReadWaveData(stream, snd);
 
 	if (res) {
