@@ -371,6 +371,9 @@ typedef enum DrawHints_ {
 	/* Vertices are 2D rects with no texture scaling or repeating */
 	/* Typically this is only used for textures purely containing text */
 	DRAW_HINT_RECT   = 0x04,
+	/* Quads in this opaque 3D batch may be traversed back-to-front in memory */
+	/* so their actual raster order becomes front-to-back. */
+	DRAW_HINT_REVERSE = 0x08,
 } DrawHints;
 
 /* Sets the format of the rendered vertices */
@@ -435,6 +438,7 @@ void* Gfx_CreateMapCullBounds(GfxResourceID vb, int verticesCount,
 	int originX, int originY, int originZ);
 void Gfx_DeleteMapCullBounds(void** bounds);
 void Gfx_BindMapCullBounds(void* bounds, int originX, int originY, int originZ);
+cc_bool Gfx_IsBoundMapOccluded(void);
 #endif
 #ifdef CC_CLIPPING_FLAGS
 cc_bool Gfx_CanSphereSkipClipping(float x, float y, float z, float radius);

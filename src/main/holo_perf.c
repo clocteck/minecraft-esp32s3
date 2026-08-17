@@ -18,7 +18,7 @@ typedef struct HoloPerfCounters {
 } HoloPerfCounters;
 
 typedef struct HoloLogBuilder {
-    char data[448];
+    char data[576];
     size_t length;
 } HoloLogBuilder;
 
@@ -30,6 +30,9 @@ static uint64_t s_frame_total_us;
 static uint64_t s_frame_max_us;
 static uint32_t s_frames;
 static uint8_t s_frame_active;
+static int32_t s_pose_x100, s_pose_y100, s_pose_z100;
+static int32_t s_pose_yaw100, s_pose_pitch100;
+static uint32_t s_pose_hud_vertices;
 
 static void counters_clear(HoloPerfCounters *counters)
 {
@@ -86,6 +89,18 @@ static void log_append_fixed2(HoloLogBuilder *builder, uint64_t hundredths)
     log_append_char(builder, '.');
     log_append_char(builder, (char)('0' + (hundredths / 10U) % 10U));
     log_append_char(builder, (char)('0' + hundredths % 10U));
+}
+
+static void log_append_signed_fixed2(HoloLogBuilder *builder, int32_t hundredths)
+{
+    uint32_t magnitude;
+    if (hundredths < 0) {
+        log_append_char(builder, '-');
+        magnitude = (uint32_t)(-(int64_t)hundredths);
+    } else {
+        magnitude = (uint32_t)hundredths;
+    }
+    log_append_fixed2(builder, magnitude);
 }
 
 static void log_append_avg_ms(HoloLogBuilder *builder, const char *name, uint64_t total_us)
@@ -156,10 +171,18 @@ static void report_window(uint64_t now_us)
     log_append_avg_count(&line, " spanpx=", s_total.slots[HOLO_PERF_RASTER_SPAN_PIXELS]);
     log_append_avg_count(&line, " texHit=", s_total.slots[HOLO_PERF_TEXTURE_REUSE]);
     log_append_avg_count(&line, " texMiss=", s_total.slots[HOLO_PERF_TEXTURE_LOAD]);
+    log_append_avg_count(&line, " tintHit=", s_total.slots[HOLO_PERF_TINT_REUSE]);
+    log_append_avg_count(&line, " tintMiss=", s_total.slots[HOLO_PERF_TINT_LOAD]);
     log_append_avg_count(&line, " perspTri=", s_total.slots[HOLO_PERF_PERSPECTIVE_TRIANGLES]);
     log_append_avg_count(&line, " perspPx=", s_total.slots[HOLO_PERF_PERSPECTIVE_PIXELS]);
     log_append_avg_count(&line, " perspRc=", s_total.slots[HOLO_PERF_PERSPECTIVE_RECIPROCALS]);
     log_append_avg_count(&line, " rQuad=", s_total.slots[HOLO_PERF_RASTER_QUADS]);
+    log_append_avg_count(&line, " sprQ=", s_total.slots[HOLO_PERF_SPRITE_QUADS]);
+    log_append_avg_count(&line, " sprCull=", s_total.slots[HOLO_PERF_SPRITE_CULL]);
+    log_append_avg_count(&line, " hizQ=", s_total.slots[HOLO_PERF_HIZ_TESTS]);
+    log_append_avg_count(&line, " hizCull=", s_total.slots[HOLO_PERF_HIZ_CULL]);
+    log_append_avg_count(&line, " chzQ=", s_total.slots[HOLO_PERF_CHUNK_HIZ_TESTS]);
+    log_append_avg_count(&line, " chzCull=", s_total.slots[HOLO_PERF_CHUNK_HIZ_CULL]);
     log_append_avg_count(&line, " projV=", s_total.slots[HOLO_PERF_PROJECTED_VERTICES]);
     log_append_avg_count(&line, " projReuse=", s_total.slots[HOLO_PERF_PROJECTION_REUSE]);
     log_append_avg_count(&line, " cutPx=", s_total.slots[HOLO_PERF_FAST_CUTOUT_PIXELS]);
@@ -183,6 +206,21 @@ static void report_window(uint64_t now_us)
     log_append_text(&line, " hotFb=");
     log_append_u64(&line, holo_port_hot_vb_fallbacks());
     log_append_text(&line, " psramFree="); log_append_u64(&line, psram_free);
+    holo_port_log(line.data);
+
+    line.length = 0; line.data[0] = '\0';
+    log_append_text(&line, "[cc.perf.pose] x=");
+    log_append_signed_fixed2(&line, s_pose_x100);
+    log_append_text(&line, " y=");
+    log_append_signed_fixed2(&line, s_pose_y100);
+    log_append_text(&line, " z=");
+    log_append_signed_fixed2(&line, s_pose_z100);
+    log_append_text(&line, " yaw=");
+    log_append_signed_fixed2(&line, s_pose_yaw100);
+    log_append_text(&line, " pitch=");
+    log_append_signed_fixed2(&line, s_pose_pitch100);
+    log_append_text(&line, " hud=");
+    log_append_u64(&line, s_pose_hud_vertices);
     holo_port_log(line.data);
 }
 
@@ -238,3 +276,10 @@ void holo_perf_count_triangles(uint32_t count) { if (s_frame_active) s_frame.tri
 void holo_perf_count_bbox_pixels(uint64_t count) { if (s_frame_active) s_frame.bbox_pixels += count; }
 void holo_perf_count_chunk_build(void) { if (s_frame_active) s_frame.chunk_builds++; }
 void holo_perf_count_dma_submit(void) { if (s_frame_active) s_frame.dma_submits++; }
+void holo_perf_set_pose(int32_t x100, int32_t y100, int32_t z100,
+                        int32_t yaw100, int32_t pitch100, uint32_t hud_vertices)
+{
+    s_pose_x100 = x100; s_pose_y100 = y100; s_pose_z100 = z100;
+    s_pose_yaw100 = yaw100; s_pose_pitch100 = pitch100;
+    s_pose_hud_vertices = hud_vertices;
+}

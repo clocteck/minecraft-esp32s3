@@ -378,7 +378,7 @@ static void LoadOptions(void) {
 	Game_AllowServerTextures = !Game_ClassicMode && Options_GetBool(OPT_SERVER_TEXTURES,    true);
 
 #ifdef CC_BUILD_ESP32S3
-	Game_ViewDistance     = Options_GetInt(OPT_VIEW_DISTANCE, 4, 4096, 16);
+	Game_ViewDistance     = Options_GetInt(OPT_VIEW_DISTANCE, 4, 4096, 20);
 #else
 	Game_ViewDistance     = Options_GetInt(OPT_VIEW_DISTANCE, 8, 4096, DEFAULT_VIEWDIST);
 #endif
@@ -887,6 +887,12 @@ void Game_RenderFrame(void) {
 	Gfx_EndFrame();
 #ifdef CC_BUILD_ESP32S3
 	holo_perf_add(HOLO_PERF_PRESENT, Stopwatch_ElapsedMicroseconds(perfMark, Stopwatch_Measure()));
+	holo_perf_set_pose((int32_t)(Camera.CurrentPos.x * 100.0f),
+		(int32_t)(Camera.CurrentPos.y * 100.0f),
+		(int32_t)(Camera.CurrentPos.z * 100.0f),
+		(int32_t)(Entities.CurPlayer->Base.Yaw * 100.0f),
+		(int32_t)(Entities.CurPlayer->Base.Pitch * 100.0f),
+		(uint32_t)ICOUNT(Game_Vertices));
 #endif
 	if (gfx_minFrameMs != 0.0f) LimitFPS();
 #ifdef CC_BUILD_ESP32S3

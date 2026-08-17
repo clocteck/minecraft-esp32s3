@@ -21,6 +21,23 @@ buffer (27,648 bytes) prefers internal RAM and falls back to PSRAM without chang
 resolution. 3D samples use fixed 5:3 expansion into the native 320x240 framebuffer while
 UI remains native. This build still requires PSRAM for the game heap.
 
+The ESP32-S3 terrain path keeps mesh faces as quads through clipping and
+rasterisation. Near-to-far face ordering feeds conservative 4x4/8x8 hierarchical
+Z rejection for individual quads and whole chunks; a bound is skipped only when
+every covered depth cell proves it hidden. Chunk-local bounds use conservative
+1/8-block quantisation. The fixed 192-to-320 output map is packed for two-load
+RGB565 stores, and an eight-entry tint LUT replaces per-pixel colour multiplies
+without changing the resulting RGB565 value. Near-plane raster edge coordinates
+use a range that remains safe when the camera is very close to geometry.
+
+For repeatable profiling, serial output includes camera position, yaw, pitch,
+HUD vertex count, submitted quads, raster primitives, bounding-box/span pixels,
+Hi-Z decisions, projected vertices, and perspective reciprocal counts. A
+10-second fixed-seed checkpoint at `(32.50, 34.62, 32.50)`, yaw/pitch zero,
+view distance 20 improved from about 14.35 FPS / 69.5 ms frame / 62.1 ms
+`draw3d` at the start of this optimisation batch to 17.07-17.26 FPS /
+57.8-57.9 ms frame / 50.4-50.5 ms `draw3d`.
+
 Sound effects use one host-owned mono I2S stream. Up to eight virtual voices
 are mixed by a PSRAM-stack worker pinned to Core 0; sound samples remain in
 PSRAM and the host owns all internal DMA buffers. Background music stays
