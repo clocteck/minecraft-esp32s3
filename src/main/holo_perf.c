@@ -139,6 +139,10 @@ static void report_window(uint64_t now_us)
     log_append_u64(&line, s_frame_max_us / 1000U);
     log_append_avg_ms(&line, " logic=", s_total.slots[HOLO_PERF_LOGIC]);
     log_append_avg_ms(&line, " 3d=", s_total.slots[HOLO_PERF_RENDER3D]);
+    log_append_text(&line, " reuse3d=");
+    log_append_u64(&line, s_frames ?
+        (s_total.slots[HOLO_PERF_3D_REUSE] * 100U) / s_frames : 0);
+    log_append_char(&line, '%');
     log_append_avg_ms(&line, " gui=", s_total.slots[HOLO_PERF_GUI2D]);
     log_append_avg_ms(&line, " present=", s_total.slots[HOLO_PERF_PRESENT]);
     holo_port_log(line.data);

@@ -6,6 +6,7 @@
 typedef enum HoloPerfSlot {
     HOLO_PERF_LOGIC = 0,
     HOLO_PERF_RENDER3D,
+    HOLO_PERF_3D_REUSE,
     HOLO_PERF_GUI2D,
     HOLO_PERF_PRESENT,
     HOLO_PERF_MAP_UPDATE,

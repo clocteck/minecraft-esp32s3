@@ -75,6 +75,11 @@ void MapRenderer_RenderTranslucent(float delta);
 /* Potentially builds meshes for several nearby chunks. */
 /* NOTE: This should be called once per frame. */
 void MapRenderer_Update(float delta);
+#ifdef CC_BUILD_ESP32S3
+/* True only when reusing the previous 3D sample cannot hide a pending chunk
+ * rebuild. Camera equality and refresh cadence are checked by Game.c. */
+cc_bool MapRenderer_CanReuseFrame(void);
+#endif
 
 /* Marks the given chunk as needing to be rebuilt/redrawn. */
 /* NOTE: Coordinates outside the map are simply ignored. */

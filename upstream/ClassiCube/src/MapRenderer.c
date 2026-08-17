@@ -870,6 +870,12 @@ static void UpdateChunks(float delta) {
 	if (!samePos || chunkUpdates) ResetPartFlags();
 }
 
+#ifdef CC_BUILD_ESP32S3
+cc_bool MapRenderer_CanReuseFrame(void) {
+	return mapChunks != NULL && !chunksNeedScan;
+}
+#endif
+
 static void SortMapChunks(int left, int right) {
 	struct ChunkInfo** values = sortedChunks; struct ChunkInfo* value;
 	cc_uint32* keys = distances; cc_uint32 key;
