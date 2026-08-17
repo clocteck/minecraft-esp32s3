@@ -119,11 +119,12 @@ static void CheckWeather(float delta) {
 	#define DrawBatchHint(count, start, hint) Gfx_DrawIndexedTris_T2fC4b(count, start, \
 		(DrawHints)((info->skipClip ? DRAW_HINT_NOCLIP : 0) | (hint)))
 	#define DrawSpriteBatch(count, start) Gfx_DrawIndexedTris_T2fC4b(count, start, \
-		(DrawHints)((info->skipClip ? DRAW_HINT_NOCLIP : 0) | DRAW_HINT_SPRITE))
+		(DrawHints)((info->skipClip ? DRAW_HINT_NOCLIP : 0) | DRAW_HINT_SPRITE | lodHint))
 #else
 	#define DrawBatch(count, start) Gfx_DrawIndexedTris_T2fC4b(count, start, 0)
 	#define DrawBatchHint(count, start, hint) Gfx_DrawIndexedTris_T2fC4b(count, start, hint)
-	#define DrawSpriteBatch(count, start) Gfx_DrawIndexedTris_T2fC4b(count, start, DRAW_HINT_SPRITE)
+	#define DrawSpriteBatch(count, start) Gfx_DrawIndexedTris_T2fC4b(count, start, \
+		(DrawHints)(DRAW_HINT_SPRITE | lodHint))
 #endif
 
 #if CC_GFX_BACKEND == CC_GFX_BACKEND_GL11
@@ -139,15 +140,15 @@ static void CheckWeather(float delta) {
 #define DrawNormalFaces(minFace, maxFace) \
 if (drawMin && drawMax) { \
 	Gfx_SetFaceCulling(true); \
-	DrawFaceHint(minFace, offset, DRAW_HINT_NONE); \
-	DrawFaceHint(maxFace, offset + part.counts[minFace], DRAW_HINT_REVERSE); \
+	DrawFaceHint(minFace, offset, lodHint); \
+	DrawFaceHint(maxFace, offset + part.counts[minFace], (DrawHints)(lodHint | DRAW_HINT_REVERSE)); \
 	Gfx_SetFaceCulling(false); \
 	Game_Vertices += (part.counts[minFace] + part.counts[maxFace]); \
 } else if (drawMin) { \
-	DrawFaceHint(minFace, offset, DRAW_HINT_NONE); \
+	DrawFaceHint(minFace, offset, lodHint); \
 	Game_Vertices += part.counts[minFace]; \
 } else if (drawMax) { \
-	DrawFaceHint(maxFace, offset + part.counts[minFace], DRAW_HINT_REVERSE); \
+	DrawFaceHint(maxFace, offset + part.counts[minFace], (DrawHints)(lodHint | DRAW_HINT_REVERSE)); \
 	Game_Vertices += part.counts[maxFace]; \
 }
 #else
@@ -166,12 +167,28 @@ if (drawMin && drawMax) { \
 }
 #endif
 
+#ifdef CC_BUILD_ESP32S3
+static cc_bool ChunkUsesFarLod(const struct ChunkInfo* info) {
+	float dx = Camera.CurrentPos.x - info->centreX;
+	float dy = Camera.CurrentPos.y - info->centreY;
+	float dz = Camera.CurrentPos.z - info->centreZ;
+	float limit = (float)Game_ViewDistance;
+	return dx * dx + dy * dy + dz * dz > limit * limit;
+}
+#endif
+
 static void RenderNormalBatch(int batch) {
 	int batchOffset = chunksCount * batch;
 	struct ChunkInfo* info;
 	struct ChunkPartInfo part;
 	cc_bool drawMin, drawMax;
 	int i, offset, count;
+#ifdef CC_BUILD_ESP32S3
+	cc_bool farLod;
+	DrawHints lodHint;
+#else
+	DrawHints lodHint = DRAW_HINT_NONE;
+#endif
 
 	for (i = 0; i < renderChunksCount; i++) {
 		info = renderChunks[i];
@@ -180,6 +197,10 @@ static void RenderNormalBatch(int batch) {
 		part = info->normalParts[batchOffset];
 		if (part.offset < 0) continue;
 		hasNormParts[batch] = true;
+#ifdef CC_BUILD_ESP32S3
+		farLod = ChunkUsesFarLod(info);
+		lodHint = farLod ? DRAW_HINT_AFFINE : DRAW_HINT_NONE;
+#endif
 
 #if defined CC_BUILD_ESP32S3 && defined CC_BUILD_SOFTFP_QUAD_FRUSTUM_CULL
 		Gfx_SetMapClipPlanes(info->softClipPlanes);
@@ -257,6 +278,10 @@ static void RenderNormalBatch(int batch) {
 #endif
 
 		if (!part.spriteCount) continue;
+#ifdef CC_BUILD_ESP32S3
+		/* Distant crossed-plane vegetation is already inside the fog band. */
+		if (farLod) continue;
+#endif
 		offset = part.offset;
 		count  = part.spriteCount >> 2; /* 4 per sprite */
 
@@ -343,6 +368,17 @@ void MapRenderer_RenderNormal(float delta) {
 #endif
 }
 
+#if defined CC_BUILD_ESP32S3 && CC_GFX_BACKEND != CC_GFX_BACKEND_GL11
+#define DrawTranslucentFaces(minFace, maxFace) \
+if (drawMin) { \
+	DrawFaceHint(minFace, offset, lodHint); \
+	Game_Vertices += part.counts[minFace]; \
+} \
+if (drawMax) { \
+	DrawFaceHint(maxFace, offset + part.counts[minFace], lodHint); \
+	Game_Vertices += part.counts[maxFace]; \
+}
+#else
 #define DrawTranslucentFaces(minFace, maxFace) \
 if (drawMin && drawMax) { \
 	DrawFaces(minFace, maxFace, offset); \
@@ -354,6 +390,7 @@ if (drawMin && drawMax) { \
 	DrawFace(maxFace, offset + part.counts[minFace]); \
 	Game_Vertices += part.counts[maxFace]; \
 }
+#endif
 
 static void RenderTranslucentBatch(int batch) {
 	int batchOffset = chunksCount * batch;
@@ -361,6 +398,11 @@ static void RenderTranslucentBatch(int batch) {
 	struct ChunkPartInfo part;
 	cc_bool drawMin, drawMax;
 	int i, offset;
+#ifdef CC_BUILD_ESP32S3
+	DrawHints lodHint;
+#else
+	DrawHints lodHint = DRAW_HINT_NONE;
+#endif
 
 	for (i = 0; i < renderChunksCount; i++) {
 		info = renderChunks[i];
@@ -369,6 +411,9 @@ static void RenderTranslucentBatch(int batch) {
 		part = info->translucentParts[batchOffset];
 		if (part.offset < 0) continue;
 		hasTranParts[batch] = true;
+#ifdef CC_BUILD_ESP32S3
+		lodHint = ChunkUsesFarLod(info) ? DRAW_HINT_AFFINE : DRAW_HINT_NONE;
+#endif
 
 #if CC_GFX_BACKEND != CC_GFX_BACKEND_GL11
 		Gfx_BindVb_Textured(info->vb);

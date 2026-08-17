@@ -374,6 +374,8 @@ typedef enum DrawHints_ {
 	/* Quads in this opaque 3D batch may be traversed back-to-front in memory */
 	/* so their actual raster order becomes front-to-back. */
 	DRAW_HINT_REVERSE = 0x08,
+	/* Distant map geometry may use affine texture interpolation. */
+	DRAW_HINT_AFFINE  = 0x20,
 } DrawHints;
 
 /* Sets the format of the rendered vertices */

@@ -164,6 +164,10 @@ static int vp_raster_hwidth_fp, vp_raster_hheight_fp;
 static cc_uint16 raster_to_color_xw[CLASSICUBE_3D_WIDTH];
 static cc_uint32 raster_to_color_rowh[CLASSICUBE_3D_HEIGHT];
 #define SOFTFP_GROUPED_RASTER
+#if defined CC_BUILD_ESP32S3 && defined CC_BUILD_SOFTFP_FB16
+#define SOFTFP_LOWRES_COLOR_STAGE
+static SoftPixel* rasterColorBuffer;
+#endif
 #endif
 #ifdef CC_BUILD_SOFTFP_TERRAIN_TILE_CACHE
 #define TERRAIN_TILE_CACHE_SLOTS 8
@@ -408,6 +412,10 @@ void Gfx_Create(void) {
 
 static void DestroyBuffers(void) {
     Window_FreeFramebuffer(&fb_bmp);
+#ifdef SOFTFP_LOWRES_COLOR_STAGE
+    Mem_Free(rasterColorBuffer);
+    rasterColorBuffer = NULL;
+#endif
 #ifdef CC_BUILD_SOFTFP_W_DEPTH8
     if (depthBuffer && !depthBufferInternal) Mem_Free(depthBuffer);
     depthBufferInternal = false;
@@ -665,6 +673,38 @@ void Gfx_DisableMipmaps(void) { }
 *--------------------------------------------------------2D drawing-------------------------------------------------------*
 *#########################################################################################################################*/
 void Gfx_Begin2D(int width, int height) {
+#ifdef SOFTFP_LOWRES_COLOR_STAGE
+	cc_uint64 upscaleMark = Stopwatch_Measure();
+	int y;
+	for (y = 0; y < raster_height; y++) {
+		const SoftPixel* src = rasterColorBuffer + y * raster_width;
+		cc_uint32 rowh = raster_to_color_rowh[y];
+		SoftPixel* dst = colorBuffer + (rowh & ~RASTER_GROUP_DOUBLE_Y);
+
+		if (raster_width == 192 && fb_width == 320) {
+			int x, out = 0;
+			for (x = 0; x < 192; x += 3, out += 5) {
+				SoftPixel c0 = src[x + 0], c1 = src[x + 1], c2 = src[x + 2];
+				dst[out + 0] = c0;
+				dst[out + 1] = c1; dst[out + 2] = c1;
+				dst[out + 3] = c2; dst[out + 4] = c2;
+			}
+		} else {
+			int x;
+			for (x = 0; x < raster_width; x++) {
+				cc_uint16 xw = raster_to_color_xw[x];
+				int out = xw & ~RASTER_GROUP_DOUBLE_X;
+				dst[out] = src[x];
+				if (xw & RASTER_GROUP_DOUBLE_X) dst[out + 1] = src[x];
+			}
+		}
+		if (rowh & RASTER_GROUP_DOUBLE_Y) {
+			Mem_Copy(dst + cb_stride, dst, fb_width * sizeof(SoftPixel));
+		}
+	}
+	holo_perf_add(HOLO_PERF_UPSCALE,
+		Stopwatch_ElapsedMicroseconds(upscaleMark, Stopwatch_Measure()));
+#endif
 	gfx_rendering2D = true;
 
 	Gfx_SetDepthTest(false);
@@ -715,26 +755,34 @@ static void SetAlphaBlend(cc_bool enabled) {
 void Gfx_SetAlphaArgBlend(cc_bool enabled) { }
 
 static void ClearColorBuffer(void) {
-    int i, x, y, size = fb_width * fb_height;
+    SoftPixel* target = colorBuffer;
+    int width = fb_width, height = fb_height, stride = cb_stride;
+    int i, x, y, size;
     SoftPixel fill = SoftPixel_FromBitmap(clearColor);
 
-#if defined CC_BUILD_SOFTFP_ASYNC_CLEAR && defined CC_BUILD_SOFTFP_FB16
+#ifdef SOFTFP_LOWRES_COLOR_STAGE
+    target = rasterColorBuffer;
+    width  = raster_width;
+    height = raster_height;
+    stride = raster_width;
+#elif defined CC_BUILD_SOFTFP_ASYNC_CLEAR && defined CC_BUILD_SOFTFP_FB16
     if (asyncPresenterClear &&
         holo_port_presenter_take_precleared_color(colorBuffer, (cc_uint16)fill)) return;
 #endif
-    if (cb_stride == fb_width) {
+    size = width * height;
+    if (stride == width) {
         for (i = 0; i + 3 < size; i += 4) {
-            colorBuffer[i + 0] = fill;
-            colorBuffer[i + 1] = fill;
-            colorBuffer[i + 2] = fill;
-            colorBuffer[i + 3] = fill;
+            target[i + 0] = fill;
+            target[i + 1] = fill;
+            target[i + 2] = fill;
+            target[i + 3] = fill;
         }
-        for (; i < size; i++) colorBuffer[i] = fill;
+        for (; i < size; i++) target[i] = fill;
     } else {
-        for (y = 0; y < fb_height; y++) {
-            i = y * cb_stride;
-            for (x = 0; x < fb_width; x++) {
-                colorBuffer[i + x] = fill;
+        for (y = 0; y < height; y++) {
+            i = y * stride;
+            for (x = 0; x < width; x++) {
+                target[i + x] = fill;
             }
         }
     }
@@ -1819,6 +1867,9 @@ static CC_INLINE SoftPixel BlendSoftPixel(int srcR, int srcG, int srcB,
 
 #ifdef SOFTFP_GROUPED_RASTER
 static CC_INLINE void StoreRasterGroup(int rasterX, int rasterY, SoftPixel color) {
+#ifdef SOFTFP_LOWRES_COLOR_STAGE
+    rasterColorBuffer[rasterY * raster_width + rasterX] = color;
+#else
     cc_uint32 rowh = raster_to_color_rowh[rasterY];
     cc_uint16 xw = raster_to_color_xw[rasterX];
     SoftPixel* dst = colorBuffer + (rowh & ~RASTER_GROUP_DOUBLE_Y) +
@@ -1833,10 +1884,15 @@ static CC_INLINE void StoreRasterGroup(int rasterX, int rasterY, SoftPixel color
         dst[0] = color;
         if (xw & RASTER_GROUP_DOUBLE_X) dst[1] = color;
     }
+#endif
 }
 
 static CC_INLINE void BlendRasterGroup(int rasterX, int rasterY,
     int srcR, int srcG, int srcB, int srcA) {
+#ifdef SOFTFP_LOWRES_COLOR_STAGE
+    SoftPixel* dst = rasterColorBuffer + rasterY * raster_width + rasterX;
+    *dst = BlendSoftPixel(srcR, srcG, srcB, srcA, *dst);
+#else
     cc_uint32 rowh = raster_to_color_rowh[rasterY];
     cc_uint16 xw = raster_to_color_xw[rasterX];
     SoftPixel* dst = colorBuffer + (rowh & ~RASTER_GROUP_DOUBLE_Y) +
@@ -1853,6 +1909,7 @@ static CC_INLINE void BlendRasterGroup(int rasterX, int rasterY,
             dst[1] = BlendSoftPixel(srcR, srcG, srcB, srcA, dst[1]);
         }
     }
+#endif
 }
 #endif
 
@@ -2133,7 +2190,7 @@ static CC_NOINLINE void DrawTriangleFastTerrain(VertexFixed* V0, VertexFixed* V1
     int b1 = PackedCol_B(V0->c);
     const TerrainTintTable* tintTable;
     cc_bool perspective;
-    int perspectiveInterval = 1 << perspectiveShift;
+    int perspectiveInterval = perspectiveShift >= 0 ? 1 << perspectiveShift : 1;
     cc_uint32 spanPixelsLocal = 0;
     cc_uint32 perspectiveTrianglesLocal = 0, perspectivePixelsLocal = 0;
     cc_uint32 perspectiveReciprocalsLocal = 0;
@@ -2176,7 +2233,7 @@ static CC_NOINLINE void DrawTriangleFastTerrain(VertexFixed* V0, VertexFixed* V1
     {
         int wMin = min(w0, min(w1, w2));
         int wMax = max(w0, max(w1, w2));
-        perspective = wMin > 0 && wMax != wMin;
+        perspective = perspectiveShift >= 0 && wMin > 0 && wMax != wMin;
     }
     if (perspective) {
         u0 = FixedMul(u0, w0); v0 = FixedMul(v0, w0);
@@ -2361,7 +2418,7 @@ static CC_NOINLINE void DrawQuadFastTerrain(VertexFixed quad[4], int area,
     int step_ic0_per_x, step_ic1_per_x, step_ic2_per_x;
     int step_w, step_u, step_v;
     int orientation = area < 0 ? -1 : 1;
-    int perspectiveInterval = 1 << perspectiveShift;
+    int perspectiveInterval = perspectiveShift >= 0 ? 1 << perspectiveShift : 1;
     int r1 = PackedCol_R(quad[0].c);
     int g1 = PackedCol_G(quad[0].c);
     int b1 = PackedCol_B(quad[0].c);
@@ -2444,7 +2501,7 @@ static CC_NOINLINE void DrawQuadFastTerrain(VertexFixed quad[4], int area,
     {
         int wMin = min(min(w0, w1), min(w2, w3));
         int wMax = max(max(w0, w1), max(w2, w3));
-        perspective = wMin > 0 && wMax != wMin;
+        perspective = perspectiveShift >= 0 && wMin > 0 && wMax != wMin;
     }
     if (perspective) {
         u0 = FixedMul(u0, w0); v0 = FixedMul(v0, w0);
@@ -2634,7 +2691,7 @@ static void DrawTriangle3DGeneric(VertexFixed* V0, VertexFixed* V1,
     int R = 0, G = 0, B = 0, A = 0, a1 = 0, r1 = 0, g1 = 0, b1 = 0;
 #ifdef CC_BUILD_SOFTFP_PERSPECTIVE4
     cc_bool perspective = false;
-    int perspectiveInterval = 1 << perspectiveShift;
+    int perspectiveInterval = perspectiveShift >= 0 ? 1 << perspectiveShift : 1;
 #endif
 #ifdef CC_BUILD_SOFTFP_TEXEL_2X2
     cc_uint32 texReuseLocal = 0, texLoadsLocal = 0;
@@ -2717,7 +2774,7 @@ static void DrawTriangle3DGeneric(VertexFixed* V0, VertexFixed* V1,
          * Every face with real depth variation instead uses screen-aligned
          * perspective spans, so both triangles of a block face sample the
          * same texture mapping and cannot expose a diagonal half-face seam. */
-        perspective = wMin > 0 && wMax != wMin;
+        perspective = perspectiveShift >= 0 && wMin > 0 && wMax != wMin;
         if (perspective) {
             u0 = FixedMul(u0, w0); v0 = FixedMul(v0, w0);
             u1 = FixedMul(u1, w1); v1 = FixedMul(v1, w1);
@@ -3249,9 +3306,9 @@ static void DrawTriangle2D(VertexFixed* V0, VertexFixed* V1, VertexFixed* V2) {
 
 
 static void ProcessClippedTriangleAndDraw(VertexFixed* inVerts, int polyCount,
-                                          cc_bool optimizeMap) {
+                                          cc_bool optimizeMap, cc_bool forceAffine) {
     int i;
-    int perspectiveShift = 2;
+    int perspectiveShift = forceAffine ? -1 : 2;
 #ifdef CC_BUILD_SOFTFP_PERSPECTIVE4
     int minW = INT_MAX;
 #endif
@@ -3273,7 +3330,7 @@ static void ProcessClippedTriangleAndDraw(VertexFixed* inVerts, int polyCount,
     }
 
 #ifdef CC_BUILD_SOFTFP_PERSPECTIVE4
-    if (optimizeMap) perspectiveShift = 0;
+    if (optimizeMap && !forceAffine) perspectiveShift = 0;
 #endif
 
 #ifdef SOFTFP_FAST_TERRAIN_KERNEL
@@ -3501,14 +3558,14 @@ static CC_INLINE cc_uint32 VertexClipOutcode(const VertexFixed* vertex,
 }
 
 static void DrawClippedFixed(VertexFixed quad[4], cc_uint32 planeMask,
-                             cc_bool optimizeMap) {
+                             cc_bool optimizeMap, cc_bool forceAffine) {
 	VertexFixed buf1[16], buf2[16];
     VertexFixed* outPoly;
     cc_uint32 clipOr = 0, clipAnd = planeMask;
     int i;
 
     if (!planeMask) {
-        ProcessClippedTriangleAndDraw(quad, 4, optimizeMap);
+        ProcessClippedTriangleAndDraw(quad, 4, optimizeMap, forceAffine);
         return;
     }
 
@@ -3519,13 +3576,13 @@ static void DrawClippedFixed(VertexFixed quad[4], cc_uint32 planeMask,
     }
     if (clipAnd) return;
     if (!clipOr) {
-        ProcessClippedTriangleAndDraw(quad, 4, optimizeMap);
+        ProcessClippedTriangleAndDraw(quad, 4, optimizeMap, forceAffine);
         return;
     }
 
     int polyCount = ClipQuadToFrustumFixed(quad, buf1, buf2, &outPoly, clipOr);
     if (polyCount > 0) {
-        ProcessClippedTriangleAndDraw(outPoly, polyCount, optimizeMap);
+        ProcessClippedTriangleAndDraw(outPoly, polyCount, optimizeMap, forceAffine);
     }
 }
 
@@ -3567,6 +3624,7 @@ void DrawQuadsFixed(int startVertex, int verticesCount, DrawHints hints) {
     } else {
 		cc_uint32 clipPlaneMask = (1u << NUM_PLANES) - 1u;
 		cc_bool optimizeMap = false;
+		cc_bool forceAffine = (hints & DRAW_HINT_AFFINE) != 0;
 #ifdef CC_BUILD_SOFTFP_QUAD_FRUSTUM_CULL
 		optimizeMap = (hints & SOFTFP_MAP_BATCH_HINT) != 0;
 		if (optimizeMap) {
@@ -3599,7 +3657,7 @@ void DrawQuadsFixed(int startVertex, int verticesCount, DrawHints hints) {
             TransformVertex3D(j + 2, &vertices[2], optimizeMap);
             TransformVertex3D(j + 3, &vertices[3], optimizeMap);
             
-            DrawClippedFixed(vertices, clipPlaneMask, optimizeMap);
+            DrawClippedFixed(vertices, clipPlaneMask, optimizeMap, forceAffine);
         }
 		}
 
@@ -3742,6 +3800,10 @@ void Gfx_OnWindowResize(int width, int height) {
     Window_AllocFramebuffer(&fb_bmp, width, height);
     colorBuffer = (SoftPixel*)fb_bmp.scan0;
     cb_stride   = fb_bmp.width;
+#ifdef SOFTFP_LOWRES_COLOR_STAGE
+    rasterColorBuffer = (SoftPixel*)Mem_Alloc(
+        raster_width, raster_height * sizeof(SoftPixel), "192x144 staged color buffer");
+#endif
 
 #ifdef CC_BUILD_SOFTFP_LOWRES_RASTER
     int i;
@@ -3776,6 +3838,12 @@ void Gfx_OnWindowResize(int width, int height) {
     }
     Mem_Set(depthBuffer, DEPTH_CLEAR_VALUE, db_stride * db_height);
     asyncPresenterClear = holo_port_presenter_async_available();
+#ifdef SOFTFP_LOWRES_COLOR_STAGE
+    /* The low-resolution stage is cleared on Core 1 and overwrites the whole
+     * native framebuffer once before UI, so clearing the native buffer on the
+     * presenter would only add redundant Core 0 traffic. */
+    asyncPresenterClear = false;
+#endif
     asyncDepthClear = false;
 #elif defined CC_BUILD_SOFTFP_ASYNC_CLEAR && !defined CC_BUILD_SOFTFP_Z16_TILES && !defined CC_BUILD_SOFTFP_Z32_FASTCLEAR
     depthBuffers[0] = Mem_Alloc(db_stride * db_height, sizeof(DepthValue), "depth buffer A");
@@ -3851,6 +3919,9 @@ void Gfx_OnWindowResize(int width, int height) {
     Platform_LogConst("[cc.gfx] raster=3D-192x144 Z8 scale5/3 UI=320x240");
 #else
     Platform_LogConst("[cc.gfx] raster=3D-lowres Z32 scaled UI=320x240");
+#endif
+#ifdef SOFTFP_LOWRES_COLOR_STAGE
+    Platform_LogConst("[cc.gfx] color=192x144 PSRAM stage upscale=once-before-UI");
 #endif
 #endif
 #ifdef CC_BUILD_SOFTFP_QUAD_FRUSTUM_CULL

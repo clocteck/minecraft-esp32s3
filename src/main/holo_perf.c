@@ -150,6 +150,7 @@ static void report_window(uint64_t now_us)
     log_append_avg_ms(&line, " trans=", s_total.slots[HOLO_PERF_MAP_TRANSLUCENT]);
     log_append_avg_ms(&line, " build=", s_total.slots[HOLO_PERF_CHUNK_BUILD]);
     log_append_avg_ms(&line, " clear=", s_total.slots[HOLO_PERF_CLEAR]);
+    log_append_avg_ms(&line, " scale=", s_total.slots[HOLO_PERF_UPSCALE]);
     log_append_avg_ms(&line, " draw3d=", s_total.slots[HOLO_PERF_DRAW3D]);
     log_append_avg_ms(&line, " draw2d=", s_total.slots[HOLO_PERF_DRAW2D]);
     log_append_avg_ms(&line, " conv=", s_total.slots[HOLO_PERF_CONVERT]);
