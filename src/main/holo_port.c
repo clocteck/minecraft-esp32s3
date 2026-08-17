@@ -5,7 +5,7 @@
 #define DMA_ROWS   16u
 #define DMA_BYTES (CLASSICUBE_DISPLAY_WIDTH * DMA_ROWS * sizeof(uint16_t))
 #define RENDER_CACHE_BYTES (CLASSICUBE_3D_WIDTH * CLASSICUBE_3D_HEIGHT)
-#define DMA_BUFFERS 3u
+#define DMA_BUFFERS 4u
 #define HOT_VB_ARENA_BYTES (16u * 1024u)
 
 typedef struct HotVbBlock {
@@ -146,8 +146,15 @@ void *holo_port_buffer(size_t bytes, unsigned index)
     if (index < 2) caps |= MODULE_HEAP_DMA;
     s_dma_buffers[index] = s_host->heap.malloc(bytes, caps);
     if (s_dma_buffers[index]) s_dma_buffer_bytes[index] = bytes;
-    if (!s_dma_buffers[index]) holo_port_set_last_error(
-        index == 2 ? "cannot allocate internal 3D depth buffer" : "cannot allocate 10 KiB internal DMA buffer");
+    if (!s_dma_buffers[index]) {
+        if (index == 2) {
+            holo_port_set_last_error("cannot allocate internal 3D depth buffer");
+        } else if (index == 3) {
+            holo_port_set_last_error("cannot allocate internal terrain texture cache");
+        } else {
+            holo_port_set_last_error("cannot allocate 10 KiB internal DMA buffer");
+        }
+    }
     return s_dma_buffers[index];
 }
 
