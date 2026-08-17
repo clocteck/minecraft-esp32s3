@@ -9,11 +9,20 @@
 #include "Funcs.h"
 #include "Game.h"
 #include "Event.h"
+#include "Platform.h"
 
-#ifdef CC_BUILD_TINYMEM
+#ifdef CC_BUILD_ESP32S3
+	#define PARTICLES_MAX 80
+	#define BREAK_PARTICLE_GRID 2
+	#define RAIN_PARTICLES_PER_EVENT 1
+#elif defined CC_BUILD_TINYMEM
 	#define PARTICLES_MAX 10
+	#define BREAK_PARTICLE_GRID 4
+	#define RAIN_PARTICLES_PER_EVENT 2
 #else
 	#define PARTICLES_MAX 600
+	#define BREAK_PARTICLE_GRID 4
+	#define RAIN_PARTICLES_PER_EVENT 2
 #endif
 
 
@@ -23,6 +32,9 @@
 static GfxResourceID particles_TexId, particles_VB;
 static RNGState rnd;
 static cc_bool hitTerrain;
+#ifdef CC_BUILD_ESP32S3
+static cc_uint8 rain_spawnPhase, custom_spawnRemainder;
+#endif
 typedef cc_bool (*CanPassThroughFunc)(BlockID b);
 
 void Particle_DoRender(const Vec2* size, const Vec3* pos, const TextureRec* rec, PackedCol col, struct VertexTextured* v) {
@@ -196,7 +208,12 @@ void Particles_RainSnowEffect(float x, float y, float z) {
 	struct Particle* p;
 	int i, type;
 
-	for (i = 0; i < 2; i++) {
+#ifdef CC_BUILD_ESP32S3
+	/* Upstream creates two particles per event. One particle every fourth
+	 * event preserves exactly one eighth of the long-term spawn rate. */
+	if (rain_spawnPhase++ & 3) return;
+#endif
+	for (i = 0; i < RAIN_PARTICLES_PER_EVENT; i++) {
 		if (rain_count == PARTICLES_MAX) Rain_RemoveAt(0);
 		p = &rain_Particles[rain_count++];
 
@@ -360,7 +377,7 @@ void Particles_BreakBlockEffect(IVec3 coords, BlockID old, BlockID now) {
 	if (minU < 12 && maxU > 12) maxUsedU = 12;
 	if (minV < 12 && maxV > 12) maxUsedV = 12;
 
-	#define GRID_SIZE 4
+	#define GRID_SIZE BREAK_PARTICLE_GRID
 	/* gridOffset gives the centre of the cell on a grid */
 	#define CELL_CENTRE ((1.0f / GRID_SIZE) * 0.5f)
 
@@ -513,7 +530,15 @@ void Particles_CustomEffect(int effectID, float x, float y, float z, float origi
 
 	origin.x = originX; origin.y = originY; origin.z = originZ;
 
-	for (i = 0; i < count; i++) 
+#ifdef CC_BUILD_ESP32S3
+	/* Keep fractional requests so repeated small effects still average 1/8
+	 * instead of either vanishing forever or always rounding up. */
+	count += custom_spawnRemainder;
+	custom_spawnRemainder = count & 7;
+	count >>= 3;
+#endif
+
+	for (i = 0; i < count; i++)
 	{
 		if (custom_count == PARTICLES_MAX) Custom_RemoveAt(0);
 		p = &custom_particles[custom_count++];
@@ -618,13 +643,22 @@ static void OnInit(void) {
 	Random_SeedFromCurrentTime(&rnd);
 	TextureEntry_Register(&particles_entry);
 
+#ifdef CC_BUILD_ESP32S3
+	Platform_LogConst("[cc.particle] spawn=1/8 pool=80 break=8/full-block");
+#endif
+
 	Event_Register_(&UserEvents.BlockChanged, NULL, OnBreakBlockEffect_Handler);
 	Event_Register_(&GfxEvents.ContextLost,   NULL, OnContextLost);
 }
 
 static void OnFree(void) { OnContextLost(NULL); }
 
-static void OnReset(void) { rain_count = 0; terrain_count = 0; custom_count = 0; }
+static void OnReset(void) {
+	rain_count = 0; terrain_count = 0; custom_count = 0;
+#ifdef CC_BUILD_ESP32S3
+	rain_spawnPhase = 0; custom_spawnRemainder = 0;
+#endif
+}
 
 struct IGameComponent Particles_Component = {
 	OnInit,  /* Init  */

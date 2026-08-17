@@ -378,11 +378,14 @@ static void LoadOptions(void) {
 	Game_AllowServerTextures = !Game_ClassicMode && Options_GetBool(OPT_SERVER_TEXTURES,    true);
 
 #ifdef CC_BUILD_ESP32S3
-	Game_ViewDistance     = Options_GetInt(OPT_VIEW_DISTANCE, 4, 4096, 6);
+	Game_ViewDistance     = Options_GetInt(OPT_VIEW_DISTANCE, 4, 4096, 16);
 #else
 	Game_ViewDistance     = Options_GetInt(OPT_VIEW_DISTANCE, 8, 4096, DEFAULT_VIEWDIST);
 #endif
 	Game_UserViewDistance = Game_ViewDistance;
+#ifdef CC_BUILD_ESP32S3
+	Platform_Log1("[cc.game] viewdist=%i", &Game_ViewDistance);
+#endif
 	/* TODO: Do we need to support option to skip SSL */
 	/*cc_bool skipSsl = Options_GetBool("skip-ssl-check", false);
 	if (skipSsl) {

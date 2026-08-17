@@ -562,7 +562,6 @@ typedef cc_uint8  cc_bool;
 	#define CC_BUILD_MAXSTACK (128 * 1024)
 	#define CC_BUILD_FPU_MODE CC_FPU_MODE_REDUCED
 	#define CC_DISABLE_EXTRA_MODELS
-	#define CC_BUILD_NO_TEXTURE_ANIMATIONS
 	#define CC_BUILD_SOFTFP_PERSPECTIVE4
 	/* Z16 NDC interpolation is intentionally disabled until its ordering
 	 * matches the original SoftFP depth convention at every view angle. */

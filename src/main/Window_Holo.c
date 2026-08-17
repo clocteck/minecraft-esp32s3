@@ -28,6 +28,7 @@
 #define BTN_SELECT 4096u
 #define BTN_START  8192u
 #define PRESENT_STACK_BYTES (12u * 1024u)
+#define RIGHT_STICK_LOOK_MULTIPLIER 6.0f
 
 struct _DisplayData DisplayInfo;
 struct cc_window WindowInfo;
@@ -332,10 +333,10 @@ static const BindMapping pad_defaults[BIND_COUNT] = {
 
 void Gamepads_PreInit(void) { }
 void Gamepads_Init(void) {
-    /* The default "Normal" camera axis is too slow for the small BLE pad.
-     * Use ClassiCube's existing 2x sensitivity step while preserving its
-     * deadzone, delta-time scaling, and acceleration behaviour. */
+    /* Keep the existing 2x sensitivity step. Raw in-game camera movement is
+     * multiplied separately so menu navigation retains its current speed. */
     Gamepad_AxisSensitivity[PAD_AXIS_RIGHT] = AXIS_SENSI_HIGH;
+    Platform_LogConst("[cc.input] right-stick look=6x-original menu=unchanged");
 }
 
 void Gamepads_Process(float delta)
@@ -358,7 +359,8 @@ void Gamepads_Process(float delta)
     Gamepad_SetButton(port, CCPAD_SELECT, b & BTN_SELECT);
     Gamepad_SetButton(port, CCPAD_START,  b & BTN_START);
     Gamepad_SetAxis(port, PAD_AXIS_LEFT, input.lx / 32767.0f, input.ly / 32767.0f, delta);
-    Gamepad_SetAxis(port, PAD_AXIS_RIGHT, input.rx / 32767.0f, input.ry / 32767.0f, delta);
+    Gamepad_SetAxis(port, PAD_AXIS_RIGHT, input.rx / 32767.0f, input.ry / 32767.0f,
+                    Input.RawMode ? delta * RIGHT_STICK_LOOK_MULTIPLIER : delta);
 }
 
 void Window_AllocFramebuffer(struct Bitmap *bmp, int width, int height)

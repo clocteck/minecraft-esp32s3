@@ -191,15 +191,19 @@ static CC_INLINE SoftPixel AveragePixel565(SoftPixel a, SoftPixel b) {
 
 static CC_INLINE SoftPixel ApplyFog4(SoftPixel source, int inverseW,
                                      cc_uint32* fogPixels) {
-    SoftPixel half;
+    SoftPixel half, quarter;
     if (!gfx_fogEnabled || inverseW >= fogWStart) return source;
     if (fogPixels) (*fogPixels)++;
-    if (inverseW < fogWEnd) return fogPixel;
 
     half = AveragePixel565(source, fogPixel);
-    if (inverseW < fogWHalf) return AveragePixel565(half, fogPixel);
-    if (inverseW < fogWQuarter) return half;
-    return AveragePixel565(source, half);
+    if (inverseW < fogWEnd) return half;
+
+    /* Preserve the existing fog distances while halving every blend level:
+     * 100/75/50/25% becomes 50/37.5/25/12.5%. */
+    quarter = AveragePixel565(source, half);
+    if (inverseW < fogWHalf) return AveragePixel565(quarter, half);
+    if (inverseW < fogWQuarter) return quarter;
+    return AveragePixel565(source, quarter);
 }
 #ifdef CC_BUILD_SOFTFP_PIXEL_PROBES
 #define APPLY_FOG4(source, inverseW, counter) \
@@ -2863,6 +2867,9 @@ void Gfx_OnWindowResize(int width, int height) {
 #endif
 #ifdef CC_BUILD_SOFTFP_QUAD_FRUSTUM_CULL
     Platform_LogConst("[cc.gfx] frontend=map-only diagonal-AABB frustum cull");
+#endif
+#ifdef CC_BUILD_SOFTFP_FOG4
+    Platform_LogConst("[cc.gfx] fog=4-level half-strength");
 #endif
 #ifdef CC_BUILD_ESP32S3
 #ifdef CC_BUILD_SOFTFP_PIXEL_PROBES

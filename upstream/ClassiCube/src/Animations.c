@@ -11,9 +11,11 @@
 #include "ExtMath.h"
 #include "Options.h"
 #include "Logger.h"
+#include "Platform.h"
 
-/* Disables when no hardware FPU, as lava/water animations are FPU heavy and thus costly */
-#if CC_BUILD_FPU_MODE >= CC_FPU_MODE_NORMAL && !defined CC_BUILD_NO_TEXTURE_ANIMATIONS
+/* ESP32-S3 has hardware floating point, but intentionally keeps the reduced
+ * global FPU feature set. Enable only texture animations for this target. */
+#if (CC_BUILD_FPU_MODE >= CC_FPU_MODE_NORMAL || defined CC_BUILD_ESP32S3) && !defined CC_BUILD_NO_TEXTURE_ANIMATIONS
 static void Animations_Update(int loc, struct Bitmap* bmp, int stride);
 
 #ifdef CC_BUILD_LOWMEM
@@ -396,6 +398,10 @@ static void OnInit(void) {
 	Game_Tasks.anims.interval = GAME_DEF_TICKS;
 	Game_Tasks.anims.callback = Animations_Tick;
 	ScheduledTask2_Add(&Game_Tasks.anims);
+
+#ifdef CC_BUILD_ESP32S3
+	Platform_LogConst("[cc.anim] texture animations=on tick=20Hz liquid=16x16");
+#endif
 
 	Event_Register_(&TextureEvents.PackChanged, NULL, OnPackChanged);
 }
