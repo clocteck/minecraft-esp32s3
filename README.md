@@ -6,7 +6,7 @@ of producing a standalone flash image.
 
 ## First-version scope
 
-- offline single-player only
+- offline single-player only, with a 64x64x64 generated world
 - fixed 192x144 3D rendering enlarged beneath native 320x240 UI
 - ClassiCube SoftFP fixed-point software renderer
 - RGB565 DMA output to the host display
@@ -34,9 +34,10 @@ For repeatable profiling, serial output includes camera position, yaw, pitch,
 HUD vertex count, submitted quads, raster primitives, bounding-box/span pixels,
 Hi-Z decisions, projected vertices, and perspective reciprocal counts. A
 10-second fixed-seed checkpoint at `(32.50, 34.62, 32.50)`, yaw/pitch zero,
-view distance 20 improved from about 14.35 FPS / 69.5 ms frame / 62.1 ms
-`draw3d` at the start of this optimisation batch to 17.07-17.26 FPS /
-57.8-57.9 ms frame / 50.4-50.5 ms `draw3d`.
+view distance 20 now sustains about 16.63-16.85 FPS / 59.2-60.0 ms frame /
+44.5-45.0 ms `draw3d` on the tested device. The older 150x40x150 island
+world is intentionally not the default because its much larger visible workload
+reduced the same 192x144 renderer to roughly 9 FPS at its fixed spawn.
 
 Sound effects use one host-owned mono I2S stream. Up to eight virtual voices
 are mixed by a PSRAM-stack worker pinned to Core 0; sound samples remain in

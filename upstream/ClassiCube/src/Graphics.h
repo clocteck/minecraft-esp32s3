@@ -376,9 +376,6 @@ typedef enum DrawHints_ {
 	DRAW_HINT_REVERSE = 0x08,
 	/* Distant map geometry may use affine texture interpolation. */
 	DRAW_HINT_AFFINE  = 0x20,
-	/* Distant affine terrain may share one texture/depth sample across 2/4 pixels. */
-	DRAW_HINT_COARSE2 = 0x40,
-	DRAW_HINT_COARSE4 = 0x80,
 } DrawHints;
 
 /* Sets the format of the rendered vertices */

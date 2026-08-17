@@ -131,11 +131,7 @@ static void SPConnection_BeginConnect(void) {
 		Map_LoadFrom(&SP_AutoloadMap); return;
 	}
 
-#if defined CC_BUILD_ESP32S3
-	/* The Holo port has enough PSRAM for a wider, shallow island world. */
-	horSize = 150;
-	verSize = 40;
-#elif defined CC_BUILD_NDS || defined CC_BUILD_PS1 || defined CC_BUILD_SATURN || defined CC_BUILD_MACCLASSIC || defined CC_BUILD_TINYMEM
+#if defined CC_BUILD_NDS || defined CC_BUILD_PS1 || defined CC_BUILD_SATURN || defined CC_BUILD_MACCLASSIC || defined CC_BUILD_TINYMEM
 	horSize = 16;
 	verSize = 16;
 #elif defined CC_BUILD_LOWMEM

@@ -208,7 +208,6 @@ static cc_uint32 terrainTintCacheHits, terrainTintCacheMisses;
 static cc_uint64 rasterBboxPixels, rasterSpanPixels;
 static cc_uint64 rasterPerspectiveTriangles, rasterPerspectivePixels;
 static cc_uint64 rasterPerspectiveReciprocals;
-static cc_uint64 rasterCoarseGroups, rasterCoarsePixels;
 static cc_uint64 rasterFrustumCacheHits, rasterFrustumCacheMisses;
 static cc_uint64 rasterTerrainQuads;
 static cc_uint64 rasterSpriteQuads, rasterSpriteCull;
@@ -814,7 +813,6 @@ static void ClearDepthBuffer(void) {
     rasterBboxPixels = rasterSpanPixels = 0;
     rasterPerspectiveTriangles = rasterPerspectivePixels = 0;
     rasterPerspectiveReciprocals = 0;
-    rasterCoarseGroups = rasterCoarsePixels = 0;
     rasterFrustumCacheHits = rasterFrustumCacheMisses = 0;
     rasterTerrainQuads = 0;
     rasterSpriteQuads = rasterSpriteCull = 0;
@@ -2045,64 +2043,6 @@ static CC_INLINE void SoftFP_RecordTerrainCoverage(int x, int y) {
     terrainHiZ[hizY * SOFTFP_HIZ_COLS + hizX] = maxDepth;
 }
 
-static CC_NOINLINE void DrawCoarseAffineSpan(int y, int minX, int maxX,
-                                             int w, int u, int v,
-                                             int stepW, int stepU, int stepV,
-                                             int sampleShift,
-                                             const SoftTexel* texture,
-                                             int textureHeightMask,
-                                             const TerrainTintTable* tint,
-                                             int tintR, int tintG, int tintB) {
-    DepthValue* depth = depthBuffer + y * db_stride + minX;
-    int sampleStep = 1 << sampleShift;
-    int x = minX;
-    cc_uint32 groups = 0, pixels = 0;
-
-    while (x <= maxX) {
-        int count = min(sampleStep, maxX - x + 1);
-        int sampleOffset = count >> 1;
-        int sampleW = w + stepW * sampleOffset;
-        int visibleMask = 0;
-        DepthValue z;
-        int i;
-
-        if (sampleW > 0) {
-            z = EncodeWDepth8(sampleW);
-            for (i = 0; i < count; i++) {
-                if (z <= depth[i]) visibleMask |= 1 << i;
-            }
-            if (visibleMask) {
-                int sampleU = u + stepU * sampleOffset;
-                int sampleV = v + stepV * sampleOffset;
-                int texX = FixedToInt(sampleU) & texWidthMask;
-                int texY = FixedToInt(sampleV) & textureHeightMask;
-                SoftTexel texel = texture[texY * curTexWidth + texX];
-
-                if (texel & SOFT_TEXEL_A_MASK) {
-                    SoftPixel color = tint ? SoftPixel_FromTintTable(texel, tint) :
-                        SoftPixel_FromTexelTint(texel, tintR, tintG, tintB);
-#ifdef CC_BUILD_SOFTFP_FOG4
-                    color = ApplyFog4(color, sampleW, NULL);
-#endif
-                    for (i = 0; i < count; i++) {
-                        if (!(visibleMask & (1 << i))) continue;
-                        depth[i] = z;
-                        SoftFP_RecordTerrainCoverage(x + i, y);
-                        StoreRasterGroup(x + i, y, color);
-                    }
-                }
-            }
-        }
-        x += count; depth += count;
-        w += stepW * count;
-        u += stepU * count;
-        v += stepV * count;
-        groups++; pixels += (cc_uint32)count;
-    }
-    rasterCoarseGroups += groups;
-    rasterCoarsePixels += pixels;
-}
-
 static CC_INLINE cc_bool SoftFP_RectOccluded(int minX, int minY, int maxX, int maxY,
                                              DepthValue nearestDepth) {
     int leafMinX = minX >> SOFTFP_COVERAGE_SHIFT;
@@ -2416,14 +2356,6 @@ static CC_NOINLINE void DrawTriangleFastTerrain(VertexFixed* V0, VertexFixed* V1
         u_interp = FixedMul(ic0, u0) + FixedMul(ic1, u1) + FixedMul(ic2, u2);
         v_interp = FixedMul(ic0, v0) + FixedMul(ic1, v1) + FixedMul(ic2, v2);
 
-        if (perspectiveShift <= -2) {
-            DrawCoarseAffineSpan(y, spanMinX, spanMaxX,
-                w_interp, u_interp, v_interp, step_w, step_u, step_v,
-                -perspectiveShift - 1, curTexPixels, texHeightMask,
-                tintTable, r1, g1, b1);
-            continue;
-        }
-
         fastDepth = depthBuffer + y * db_stride + spanMinX;
 
         for (x = spanMinX; x <= spanMaxX; x++, fastDepth++) {
@@ -2682,14 +2614,6 @@ static CC_NOINLINE void DrawQuadFastTerrain(VertexFixed quad[4], int area,
             spanPixelsLocal += (cc_uint32)(spanMaxX - spanMinX + 1);
             if (perspective) perspectivePixelsLocal += (cc_uint32)(spanMaxX - spanMinX + 1);
 
-            if (perspectiveShift <= -2) {
-                DrawCoarseAffineSpan(y, spanMinX, spanMaxX,
-                    w_interp, u_interp, v_interp, step_w, step_u, step_v,
-                    -perspectiveShift - 1, quadTexPixels, quadTexHeightMask,
-                    tintTable, r1, g1, b1);
-                goto next_quad_terrain_row;
-            }
-
             for (x = spanMinX; x <= spanMaxX; x++, fastDepth++) {
                 DepthValue fastZ;
                 if (w_interp <= 0) goto next_quad_terrain_pixel;
@@ -2779,7 +2703,6 @@ next_quad_terrain_pixel:
             }
         }
 
-next_quad_terrain_row:
         bc0_start += dy12; bc1_start += dy20; bc2_start += dy01;
         for (i = 0; i < 4; i++) edgeStart[i] += edgeStepY[i];
     }
@@ -3448,9 +3371,9 @@ static void DrawTriangle2D(VertexFixed* V0, VertexFixed* V1, VertexFixed* V2) {
 
 
 static void ProcessClippedTriangleAndDraw(VertexFixed* inVerts, int polyCount,
-                                          cc_bool optimizeMap, int affineShift) {
+                                          cc_bool optimizeMap, cc_bool forceAffine) {
     int i;
-    int perspectiveShift = affineShift >= 0 ? -(affineShift + 1) : 2;
+    int perspectiveShift = forceAffine ? -1 : 2;
 #ifdef CC_BUILD_SOFTFP_PERSPECTIVE4
     int minW = INT_MAX;
 #endif
@@ -3472,7 +3395,7 @@ static void ProcessClippedTriangleAndDraw(VertexFixed* inVerts, int polyCount,
     }
 
 #ifdef CC_BUILD_SOFTFP_PERSPECTIVE4
-    if (optimizeMap && affineShift < 0) perspectiveShift = 0;
+    if (optimizeMap && !forceAffine) perspectiveShift = 0;
 #endif
 
 #ifdef SOFTFP_FAST_TERRAIN_KERNEL
@@ -3700,14 +3623,14 @@ static CC_INLINE cc_uint32 VertexClipOutcode(const VertexFixed* vertex,
 }
 
 static void DrawClippedFixed(VertexFixed quad[4], cc_uint32 planeMask,
-                             cc_bool optimizeMap, int affineShift) {
+                             cc_bool optimizeMap, cc_bool forceAffine) {
 	VertexFixed buf1[16], buf2[16];
     VertexFixed* outPoly;
     cc_uint32 clipOr = 0, clipAnd = planeMask;
     int i;
 
     if (!planeMask) {
-        ProcessClippedTriangleAndDraw(quad, 4, optimizeMap, affineShift);
+        ProcessClippedTriangleAndDraw(quad, 4, optimizeMap, forceAffine);
         return;
     }
 
@@ -3718,13 +3641,13 @@ static void DrawClippedFixed(VertexFixed quad[4], cc_uint32 planeMask,
     }
     if (clipAnd) return;
     if (!clipOr) {
-        ProcessClippedTriangleAndDraw(quad, 4, optimizeMap, affineShift);
+        ProcessClippedTriangleAndDraw(quad, 4, optimizeMap, forceAffine);
         return;
     }
 
     int polyCount = ClipQuadToFrustumFixed(quad, buf1, buf2, &outPoly, clipOr);
     if (polyCount > 0) {
-        ProcessClippedTriangleAndDraw(outPoly, polyCount, optimizeMap, affineShift);
+        ProcessClippedTriangleAndDraw(outPoly, polyCount, optimizeMap, forceAffine);
     }
 }
 
@@ -3766,11 +3689,7 @@ void DrawQuadsFixed(int startVertex, int verticesCount, DrawHints hints) {
     } else {
 		cc_uint32 clipPlaneMask = (1u << NUM_PLANES) - 1u;
 		cc_bool optimizeMap = false;
-		int affineShift = -1;
-		if (hints & DRAW_HINT_AFFINE) {
-			affineShift = hints & DRAW_HINT_COARSE4 ? 2 :
-				(hints & DRAW_HINT_COARSE2 ? 1 : 0);
-		}
+		cc_bool forceAffine = (hints & DRAW_HINT_AFFINE) != 0;
 #ifdef CC_BUILD_SOFTFP_QUAD_FRUSTUM_CULL
 		optimizeMap = (hints & SOFTFP_MAP_BATCH_HINT) != 0;
 		if (optimizeMap) {
@@ -3803,7 +3722,7 @@ void DrawQuadsFixed(int startVertex, int verticesCount, DrawHints hints) {
             TransformVertex3D(j + 2, &vertices[2], optimizeMap);
             TransformVertex3D(j + 3, &vertices[3], optimizeMap);
             
-            DrawClippedFixed(vertices, clipPlaneMask, optimizeMap, affineShift);
+            DrawClippedFixed(vertices, clipPlaneMask, optimizeMap, forceAffine);
         }
 		}
 
@@ -3877,8 +3796,6 @@ void Gfx_EndFrame(void) {
     holo_perf_add(HOLO_PERF_PERSPECTIVE_TRIANGLES, rasterPerspectiveTriangles);
     holo_perf_add(HOLO_PERF_PERSPECTIVE_PIXELS, rasterPerspectivePixels);
     holo_perf_add(HOLO_PERF_PERSPECTIVE_RECIPROCALS, rasterPerspectiveReciprocals);
-    holo_perf_add(HOLO_PERF_COARSE_GROUPS, rasterCoarseGroups);
-    holo_perf_add(HOLO_PERF_COARSE_PIXELS, rasterCoarsePixels);
     holo_perf_add(HOLO_PERF_FRUSTUM_CACHE_HIT, rasterFrustumCacheHits);
     holo_perf_add(HOLO_PERF_FRUSTUM_CACHE_MISS, rasterFrustumCacheMisses);
     holo_perf_add(HOLO_PERF_RASTER_QUADS, rasterTerrainQuads);
@@ -4077,7 +3994,7 @@ void Gfx_OnWindowResize(int width, int height) {
 #ifdef CC_BUILD_SOFTFP_QUAD_FRUSTUM_CULL
     Platform_LogConst("[cc.gfx] frontend=map-only quad-raster AABB cull-cache packed-local/8 Hi-Z4/8");
 #endif
-    Platform_LogConst("[cc.gfx] far-lod=horizontal 3/5,9/10 view coarse=2,4 affine");
+    Platform_LogConst("[cc.gfx] far-lod=horizontal view-distance affine, full-rate sampling");
 #ifdef CC_BUILD_SOFTFP_TERRAIN_TILE_CACHE
     if (terrainTileCacheMemory) {
         Platform_LogConst("[cc.gfx] terrain-texture-cache=8x16x16 A1RGB555 internal");
