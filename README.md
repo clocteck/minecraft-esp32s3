@@ -7,19 +7,25 @@ of producing a standalone flash image.
 ## First-version scope
 
 - offline single-player only
-- 240x180 3D rendering, enlarged to the 320x240 display (160x120 internal-RAM fallback)
+- 224x168 3D rendering, enlarged to the 320x240 display (160x120 internal-RAM fallback)
 - ClassiCube SoftFP fixed-point software renderer
 - RGB565 DMA output to the host display
 - game state/options/maps on SD card
 - Lua-to-native controller bridge
+- Core 0 software-mixed 22050 Hz game sound effects through the host audio API
 - PSRAM-backed game heap and task stack
-- no networking, music, sound, updater, plugins, or FreeType
+- no networking, music, updater, plugins, or FreeType
 
-The double-buffered 320x240 colour buffers live in PSRAM. The 240x180 Z8 depth
-buffer (43,200 bytes) is reserved in internal RAM; allocation failure is reported over serial
+The double-buffered 320x240 colour buffers live in PSRAM. The 224x168 Z8 depth
+buffer (37,632 bytes) is reserved in internal RAM; allocation failure is reported over serial
 and falls back to an internal-RAM 160x120 depth buffer instead of PSRAM. This
 build still requires PSRAM for the game heap and intentionally limits the
 initial single-player world and view distance.
+
+Sound effects use one host-owned mono I2S stream. Up to eight virtual voices
+are mixed by a PSRAM-stack worker pinned to Core 0; sound samples remain in
+PSRAM and the host owns all internal DMA buffers. Background music stays
+disabled to avoid a second decoder/streaming workload.
 
 ## Build
 

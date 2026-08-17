@@ -8,6 +8,7 @@ idf_component_register(
         "classicube_module.c"
         "holo_port.c"
         "holo_perf.c"
+        "Audio_Holo.c"
         "Platform_Holo.c"
         "Window_Holo.c"
         ${CLASSICUBE_COMMON_SOURCES}

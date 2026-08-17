@@ -171,6 +171,7 @@ typedef cc_uint8  cc_bool;
 #define CC_AUD_BACKEND_OPENSLES 3
 #define CC_AUD_BACKEND_NULL     4
 #define CC_AUD_BACKEND_OS2      5
+#define CC_AUD_BACKEND_HOLO     6
 
 #define CC_FPU_MODE_MINIMAL 1 /* Integer math funcs, no animations, no held block, flat inventory */
 #define CC_FPU_MODE_LIMITED 2 /* Integer math funcs, no animations, no held block */
@@ -558,12 +559,11 @@ typedef cc_uint8  cc_bool;
 	#define CC_BUILD_LOWMEM
 	#define CC_BUILD_COOPTHREADED
 	#define CC_BUILD_NOMUSIC
-	#define CC_BUILD_NOSOUNDS
 	#define CC_BUILD_MAXSTACK (128 * 1024)
 	#define CC_BUILD_FPU_MODE CC_FPU_MODE_REDUCED
 	#define CC_DISABLE_EXTRA_MODELS
 	#define CC_BUILD_SOFTFP_PERSPECTIVE4
-	/* Use compact reciprocal-W Z8 depth so the 240x180 buffer stays in
+	/* Use compact reciprocal-W Z8 depth so the 224x168 buffer stays in
 	 * internal RAM; the logarithmic near range preserves useful precision. */
 	#define CC_BUILD_SOFTFP_HALF_ALPHA
 	#define CC_BUILD_SOFTFP_TEX16
@@ -582,7 +582,7 @@ typedef cc_uint8  cc_bool;
 	#undef  CC_BUILD_NETWORKING
 	#undef  CC_BUILD_ADVLIGHTING
 	#define DEFAULT_NET_BACKEND CC_NET_BACKEND_BUILTIN
-	#define DEFAULT_AUD_BACKEND CC_AUD_BACKEND_NULL
+	#define DEFAULT_AUD_BACKEND CC_AUD_BACKEND_HOLO
 	#define DEFAULT_GFX_BACKEND CC_GFX_BACKEND_SOFTFP
 #elif defined PLAT_GBA
 	#define CC_BUILD_GBA

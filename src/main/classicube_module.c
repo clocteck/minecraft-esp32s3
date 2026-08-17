@@ -1,5 +1,6 @@
 #include "module_abi.h"
 #include "holo_port.h"
+#include "Audio_Holo.h"
 
 #include <stdbool.h>
 #include <stddef.h>
@@ -232,7 +233,11 @@ static int l_info(lua_State *L)
     set_integer(L, "width", CLASSICUBE_RENDER_WIDTH);
     set_integer(L, "height", CLASSICUBE_RENDER_HEIGHT);
     set_integer(L, "input_mask", input.buttons);
-    set_string(L, "renderer", "SoftFP perspective/4 reciprocal-W Z8 RGB565 240x180 scaled");
+    set_string(L, "renderer", "SoftFP adaptive perspective/4/8/16 reciprocal-W Z8 RGB565 224x168 scaled");
+    set_boolean(L, "audio_active", Audio_HoloActive() != 0);
+    set_integer(L, "audio_blocks", Audio_HoloMixedBlocks());
+    set_integer(L, "audio_voices", Audio_HoloActiveVoices());
+    set_integer(L, "audio_error", Audio_HoloLastError());
     set_string(L, "last_error", holo_port_last_error());
     if (s_host->heap.free_size)
         set_integer(L, "psram_free", s_host->heap.free_size(MODULE_HEAP_PSRAM | MODULE_HEAP_8BIT));
@@ -302,8 +307,11 @@ CLASSICUBE_EXPORT void module_destroy_v1(void *instance_ptr)
         s_host->task.remove(instance->task);
         instance->task = NULL;
         instance->running = 0;
+        Audio_HoloShutdown();
         Platform_HoloForceFree();
         holo_port_display_release();
+    } else if (!instance->running) {
+        Audio_HoloShutdown();
     }
     holo_port_log("[classicube.so] destroyed");
 }

@@ -162,7 +162,8 @@ static void RenderNormalBatch(int batch) {
 #endif
 #if defined CC_BUILD_ESP32S3 && defined CC_BUILD_SOFTFP_QUAD_FRUSTUM_CULL
 		Gfx_SetMapClipPlanes(info->softClipPlanes);
-		Gfx_BindMapCullBounds(info->softCullBounds);
+		Gfx_BindMapCullBounds(info->softCullBounds,
+			info->centreX - 8, info->centreY - 8, info->centreZ - 8);
 #endif
 
 		offset  = part.offset + part.spriteCount;
@@ -270,7 +271,8 @@ static void RenderTranslucentBatch(int batch) {
 #endif
 #if defined CC_BUILD_ESP32S3 && defined CC_BUILD_SOFTFP_QUAD_FRUSTUM_CULL
 		Gfx_SetMapClipPlanes(info->softClipPlanes);
-		Gfx_BindMapCullBounds(info->softCullBounds);
+		Gfx_BindMapCullBounds(info->softCullBounds,
+			info->centreX - 8, info->centreY - 8, info->centreZ - 8);
 #endif
 
 		offset  = part.offset;

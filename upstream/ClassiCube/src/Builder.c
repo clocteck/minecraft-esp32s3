@@ -464,7 +464,8 @@ cc_bool Builder_MakeChunk(struct ChunkInfo* info) {
 #else
 	Gfx_UnlockVb(info->vb);
 #if defined CC_BUILD_ESP32S3 && defined CC_BUILD_SOFTFP_QUAD_FRUSTUM_CULL
-	info->softCullBounds = Gfx_CreateMapCullBounds(info->vb, totalVerts);
+	info->softCullBounds = Gfx_CreateMapCullBounds(
+		info->vb, totalVerts, x1, y1, z1);
 #endif
 #endif
 	return true;

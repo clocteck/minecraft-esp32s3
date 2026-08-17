@@ -429,9 +429,10 @@ void Gfx_LoadMVP(const struct Matrix* view, const struct Matrix* proj, struct Ma
 cc_uint8 Gfx_GetAABBClipPlanes(float x, float y, float z,
 	float halfX, float halfY, float halfZ);
 void Gfx_SetMapClipPlanes(cc_uint8 planes);
-void* Gfx_CreateMapCullBounds(GfxResourceID vb, int verticesCount);
+void* Gfx_CreateMapCullBounds(GfxResourceID vb, int verticesCount,
+	int originX, int originY, int originZ);
 void Gfx_DeleteMapCullBounds(void** bounds);
-void Gfx_BindMapCullBounds(void* bounds);
+void Gfx_BindMapCullBounds(void* bounds, int originX, int originY, int originZ);
 #endif
 #ifdef CC_CLIPPING_FLAGS
 cc_bool Gfx_CanSphereSkipClipping(float x, float y, float z, float radius);

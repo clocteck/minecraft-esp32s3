@@ -4,6 +4,7 @@ nostalgia-usecpe=false
 nostalgia-simplearms=true
 viewdist=20
 reach-distance=4
+soundsvolume=25
 viewbobbing=false
 fpslimit=LimitNone
 gfx-mipmaps=false
