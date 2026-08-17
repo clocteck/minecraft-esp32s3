@@ -1,0 +1,4 @@
+name = ClassiCube
+version = 0.1.0
+entry = main.lua
+description = Offline ClassiCube for ESP32-S3, native 320x240 low-effects SoftFP

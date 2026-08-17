@@ -1,0 +1,7 @@
+build/
+dist/
+package/modules/*.so
+sdkconfig
+sdkconfig.old
+dependencies.lock
+managed_components/
