@@ -6,7 +6,7 @@
 #define DMA_BYTES (CLASSICUBE_DISPLAY_WIDTH * DMA_ROWS * sizeof(uint16_t))
 #define RENDER_CACHE_BYTES (CLASSICUBE_3D_WIDTH * CLASSICUBE_3D_HEIGHT)
 #define DMA_BUFFERS 4u
-#define HOT_VB_ARENA_BYTES (16u * 1024u)
+#define HOT_VB_ARENA_BYTES (24u * 1024u)
 
 typedef struct HotVbBlock {
     uint32_t size;
@@ -178,7 +178,7 @@ bool holo_port_hot_vb_reserve(void)
         HOT_VB_ARENA_BYTES, MODULE_HEAP_INTERNAL | MODULE_HEAP_8BIT);
     if (!s_hot_vb_arena) {
         s_hot_vb_fallbacks++;
-        holo_port_log("[cc.mem] 16 KiB internal dynamic-VB arena unavailable; using PSRAM");
+        holo_port_log("[cc.mem] 24 KiB internal dynamic-VB arena unavailable; using PSRAM");
         return false;
     }
     first = (HotVbBlock *)s_hot_vb_arena;
@@ -186,7 +186,7 @@ bool holo_port_hot_vb_reserve(void)
     first->used = 0;
     s_hot_vb_used = 0;
     s_hot_vb_count = 0;
-    holo_port_log("[cc.mem] dynamic-VB arena=16384 internal contiguous");
+    holo_port_log("[cc.mem] dynamic-VB arena=24576 internal contiguous");
     return true;
 }
 

@@ -168,12 +168,21 @@ if (drawMin && drawMax) { \
 #endif
 
 #ifdef CC_BUILD_ESP32S3
-static cc_bool ChunkUsesFarLod(const struct ChunkInfo* info) {
+static DrawHints ChunkLodHints(const struct ChunkInfo* info) {
 	float dx = Camera.CurrentPos.x - info->centreX;
-	float dy = Camera.CurrentPos.y - info->centreY;
 	float dz = Camera.CurrentPos.z - info->centreZ;
-	float limit = (float)Game_ViewDistance;
-	return dx * dx + dy * dy + dz * dz > limit * limit;
+	float distance2 = dx * dx + dz * dz;
+	float mid = (float)((Game_ViewDistance * 3) / 5);
+	float far = (float)((Game_ViewDistance * 9) / 10);
+	if (mid < 8.0f) mid = 8.0f;
+	if (far < mid + 4.0f) far = mid + 4.0f;
+	if (distance2 > far * far) {
+		return (DrawHints)(DRAW_HINT_AFFINE | DRAW_HINT_COARSE4);
+	}
+	if (distance2 > mid * mid) {
+		return (DrawHints)(DRAW_HINT_AFFINE | DRAW_HINT_COARSE2);
+	}
+	return DRAW_HINT_NONE;
 }
 #endif
 
@@ -198,8 +207,8 @@ static void RenderNormalBatch(int batch) {
 		if (part.offset < 0) continue;
 		hasNormParts[batch] = true;
 #ifdef CC_BUILD_ESP32S3
-		farLod = ChunkUsesFarLod(info);
-		lodHint = farLod ? DRAW_HINT_AFFINE : DRAW_HINT_NONE;
+		lodHint = ChunkLodHints(info);
+		farLod = lodHint != DRAW_HINT_NONE;
 #endif
 
 #if defined CC_BUILD_ESP32S3 && defined CC_BUILD_SOFTFP_QUAD_FRUSTUM_CULL
@@ -412,7 +421,7 @@ static void RenderTranslucentBatch(int batch) {
 		if (part.offset < 0) continue;
 		hasTranParts[batch] = true;
 #ifdef CC_BUILD_ESP32S3
-		lodHint = ChunkUsesFarLod(info) ? DRAW_HINT_AFFINE : DRAW_HINT_NONE;
+		lodHint = ChunkLodHints(info);
 #endif
 
 #if CC_GFX_BACKEND != CC_GFX_BACKEND_GL11

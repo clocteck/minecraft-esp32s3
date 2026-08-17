@@ -18,7 +18,7 @@ typedef struct HoloPerfCounters {
 } HoloPerfCounters;
 
 typedef struct HoloLogBuilder {
-    char data[576];
+    char data[672];
     size_t length;
 } HoloLogBuilder;
 
@@ -177,6 +177,10 @@ static void report_window(uint64_t now_us)
     log_append_avg_count(&line, " perspTri=", s_total.slots[HOLO_PERF_PERSPECTIVE_TRIANGLES]);
     log_append_avg_count(&line, " perspPx=", s_total.slots[HOLO_PERF_PERSPECTIVE_PIXELS]);
     log_append_avg_count(&line, " perspRc=", s_total.slots[HOLO_PERF_PERSPECTIVE_RECIPROCALS]);
+    log_append_avg_count(&line, " coarseG=", s_total.slots[HOLO_PERF_COARSE_GROUPS]);
+    log_append_avg_count(&line, " coarsePx=", s_total.slots[HOLO_PERF_COARSE_PIXELS]);
+    log_append_avg_count(&line, " fcHit=", s_total.slots[HOLO_PERF_FRUSTUM_CACHE_HIT]);
+    log_append_avg_count(&line, " fcMiss=", s_total.slots[HOLO_PERF_FRUSTUM_CACHE_MISS]);
     log_append_avg_count(&line, " rQuad=", s_total.slots[HOLO_PERF_RASTER_QUADS]);
     log_append_avg_count(&line, " sprQ=", s_total.slots[HOLO_PERF_SPRITE_QUADS]);
     log_append_avg_count(&line, " sprCull=", s_total.slots[HOLO_PERF_SPRITE_CULL]);

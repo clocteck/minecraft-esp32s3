@@ -8,6 +8,7 @@
 #include "Errors.h"
 #include "Window.h"
 #include <limits.h>
+#include <stddef.h>
 #include <stdint.h>
 #ifdef CC_BUILD_ESP32S3
 #include "holo_perf.h"
@@ -207,6 +208,8 @@ static cc_uint32 terrainTintCacheHits, terrainTintCacheMisses;
 static cc_uint64 rasterBboxPixels, rasterSpanPixels;
 static cc_uint64 rasterPerspectiveTriangles, rasterPerspectivePixels;
 static cc_uint64 rasterPerspectiveReciprocals;
+static cc_uint64 rasterCoarseGroups, rasterCoarsePixels;
+static cc_uint64 rasterFrustumCacheHits, rasterFrustumCacheMisses;
 static cc_uint64 rasterTerrainQuads;
 static cc_uint64 rasterSpriteQuads, rasterSpriteCull;
 static cc_uint64 rasterHiZTests, rasterHiZCull;
@@ -682,12 +685,16 @@ void Gfx_Begin2D(int width, int height) {
 		SoftPixel* dst = colorBuffer + (rowh & ~RASTER_GROUP_DOUBLE_Y);
 
 		if (raster_width == 192 && fb_width == 320) {
-			int x, out = 0;
-			for (x = 0; x < 192; x += 3, out += 5) {
-				SoftPixel c0 = src[x + 0], c1 = src[x + 1], c2 = src[x + 2];
-				dst[out + 0] = c0;
-				dst[out + 1] = c1; dst[out + 2] = c1;
-				dst[out + 3] = c2; dst[out + 4] = c2;
+			cc_uint32* out = (cc_uint32*)dst;
+			int x;
+			for (x = 0; x < 192; x += 6, out += 5) {
+				cc_uint32 c0 = src[x + 0], c1 = src[x + 1], c2 = src[x + 2];
+				cc_uint32 c3 = src[x + 3], c4 = src[x + 4], c5 = src[x + 5];
+				out[0] = c0 | (c1 << 16);
+				out[1] = c1 | (c2 << 16);
+				out[2] = c2 | (c3 << 16);
+				out[3] = c4 | (c4 << 16);
+				out[4] = c5 | (c5 << 16);
 			}
 		} else {
 			int x;
@@ -807,6 +814,8 @@ static void ClearDepthBuffer(void) {
     rasterBboxPixels = rasterSpanPixels = 0;
     rasterPerspectiveTriangles = rasterPerspectivePixels = 0;
     rasterPerspectiveReciprocals = 0;
+    rasterCoarseGroups = rasterCoarsePixels = 0;
+    rasterFrustumCacheHits = rasterFrustumCacheMisses = 0;
     rasterTerrainQuads = 0;
     rasterSpriteQuads = rasterSpriteCull = 0;
     rasterHiZTests = rasterHiZCull = 0;
@@ -929,12 +938,24 @@ typedef struct SoftFPMapQuadBounds {
 } SoftFPMapQuadBounds;
 typedef struct SoftFPMapCullData {
     SoftFPMapQuadBounds aggregate;
+    cc_uint32 cacheKey;
+    cc_uint32 quadCount;
+    cc_uint32 bitBytes;
     SoftFPMapQuadBounds quads[1];
 } SoftFPMapCullData;
-static const SoftFPMapCullData* gfx_mapCullData;
+static SoftFPMapCullData* gfx_mapCullData;
 static const SoftFPMapQuadBounds* gfx_mapCullBounds;
 static SoftFPClipPlane mapCullLocalPlanes[NUM_PLANES];
 static int gfx_map_origin_x, gfx_map_origin_y, gfx_map_origin_z;
+static cc_uint32 gfx_mvp_cache_key = 1;
+
+static cc_uint8* SoftFP_CullKnownBits(SoftFPMapCullData* data) {
+    return (cc_uint8*)(data->quads + data->quadCount);
+}
+
+static cc_uint8* SoftFP_CullResultBits(SoftFPMapCullData* data) {
+    return SoftFP_CullKnownBits(data) + data->bitBytes;
+}
 
 static CC_INLINE cc_uint16 SoftFP_PackTerrainColor(PackedCol color) {
     return (cc_uint16)(((PackedCol_R(color) & 0xF8) << 8) |
@@ -964,9 +985,13 @@ void* Gfx_CreateMapCullBounds(GfxResourceID vb, int verticesCount,
     (void)originX; (void)originY; (void)originZ;
 
     if (!src || quadCount <= 0) return NULL;
-    bytes = (cc_uint32)sizeof(*data) +
-            (cc_uint32)(quadCount - 1) * (cc_uint32)sizeof(data->quads[0]);
     data = NULL;
+    {
+        cc_uint32 bitBytes = ((cc_uint32)quadCount + 7u) >> 3;
+        bytes = (cc_uint32)offsetof(SoftFPMapCullData, quads) +
+                (cc_uint32)quadCount * (cc_uint32)sizeof(data->quads[0]) +
+                bitBytes * 2u;
+    }
     /* Reuse otherwise idle space in the already-reserved internal hot arena,
      * while retaining a small tail for late dynamic UI/model vertex buffers. */
     if (holo_port_hot_vb_reserved() >=
@@ -975,6 +1000,10 @@ void* Gfx_CreateMapCullBounds(GfxResourceID vb, int verticesCount,
     }
     if (!data) data = (SoftFPMapCullData*)Mem_TryAlloc(1, bytes);
     if (!data) return NULL;
+    data->cacheKey = 0;
+    data->quadCount = (cc_uint32)quadCount;
+    data->bitBytes = ((cc_uint32)quadCount + 7u) >> 3;
+    Mem_Set(SoftFP_CullKnownBits(data), 0, data->bitBytes);
     bounds = data->quads;
     data->aggregate.minX = data->aggregate.minY = data->aggregate.minZ = 0xFF;
     data->aggregate.maxX = data->aggregate.maxY = data->aggregate.maxZ = 0;
@@ -1025,7 +1054,7 @@ void Gfx_DeleteMapCullBounds(void** bounds) {
 
 void Gfx_BindMapCullBounds(void* bounds, int originX, int originY, int originZ) {
     cc_uint8 planes;
-    gfx_mapCullData = (const SoftFPMapCullData*)bounds;
+    gfx_mapCullData = (SoftFPMapCullData*)bounds;
     gfx_mapCullBounds = gfx_mapCullData ? gfx_mapCullData->quads : NULL;
     gfx_map_origin_x = originX;
     gfx_map_origin_y = originY;
@@ -1205,6 +1234,14 @@ static void MatrixMulFixed(FixedMatrix* dst, const FixedMatrix* a, const FixedMa
 #endif
 
 #if defined CC_BUILD_SOFTFP_FLOAT_XFORM && defined CC_BUILD_SOFTFP_QUAD_FRUSTUM_CULL
+static cc_uint32 SoftFP_MatrixCacheKey(const struct Matrix* matrix) {
+    const cc_uint32* words = (const cc_uint32*)matrix;
+    cc_uint32 hash = 2166136261u;
+    int i;
+    for (i = 0; i < 16; i++) hash = (hash ^ words[i]) * 16777619u;
+    return hash ? hash : 1u;
+}
+
 static CC_NOINLINE void SoftFP_SetQuadCullPlane(int index, float x, float y, float z, float w) {
     SoftFPClipPlane* plane = &quadCullPlanes[index];
     plane->x = x; plane->y = y; plane->z = z; plane->w = w;
@@ -1263,6 +1300,7 @@ void Gfx_LoadMatrix(MatrixType type, const struct Matrix* matrix) {
     if (type == MATRIX_PROJ) _proj_float = *matrix;
     Matrix_Mul(&_mvp_float, &_view_float, &_proj_float);
 #ifdef CC_BUILD_SOFTFP_QUAD_FRUSTUM_CULL
+    gfx_mvp_cache_key = SoftFP_MatrixCacheKey(&_mvp_float);
     SoftFP_UpdateQuadCullPlanes();
 #endif
 #else
@@ -1284,6 +1322,7 @@ void Gfx_LoadMVP(const struct Matrix* view, const struct Matrix* proj, struct Ma
     Matrix_Mul(&_mvp_float, view, proj);
     *mvp = _mvp_float;
 #ifdef CC_BUILD_SOFTFP_QUAD_FRUSTUM_CULL
+    gfx_mvp_cache_key = SoftFP_MatrixCacheKey(&_mvp_float);
     SoftFP_UpdateQuadCullPlanes();
 #endif
 #else
@@ -1387,10 +1426,32 @@ static CC_NOINLINE cc_bool SoftFP_MapQuadOutsideFrustum(int firstVertex, cc_uint
     const PackedTerrainVertex* src =
         (const PackedTerrainVertex*)gfx_vertices + firstVertex;
     float minXf, minYf, minZf, maxXf, maxYf, maxZf;
+    cc_uint8 originalMask = planeMask;
+    cc_bool outside = false;
+    cc_uint8* knownBits = NULL;
+    cc_uint8* resultBits = NULL;
+    cc_uint32 quadIndex = (cc_uint32)firstVertex >> 2;
+    cc_uint32 cacheByte = quadIndex >> 3;
+    cc_uint8 cacheBit = (cc_uint8)(1u << (quadIndex & 7u));
     int i;
 
+    if (gfx_mapCullData && quadIndex < gfx_mapCullData->quadCount) {
+        cc_uint32 key = gfx_mvp_cache_key ^ ((cc_uint32)originalMask * 0x9E3779B1u);
+        knownBits  = SoftFP_CullKnownBits(gfx_mapCullData);
+        resultBits = SoftFP_CullResultBits(gfx_mapCullData);
+        if (gfx_mapCullData->cacheKey != key) {
+            gfx_mapCullData->cacheKey = key;
+            Mem_Set(knownBits, 0, gfx_mapCullData->bitBytes);
+        }
+        if (knownBits[cacheByte] & cacheBit) {
+            rasterFrustumCacheHits++;
+            return (resultBits[cacheByte] & cacheBit) != 0;
+        }
+        rasterFrustumCacheMisses++;
+    }
+
     if (gfx_mapCullBounds) {
-        const SoftFPMapQuadBounds* bounds = &gfx_mapCullBounds[firstVertex >> 2];
+        const SoftFPMapQuadBounds* bounds = &gfx_mapCullBounds[quadIndex];
         while (planeMask) {
             const float rejectMargin = -1.0f / 1024.0f;
             const SoftFPClipPlane* plane;
@@ -1403,9 +1464,9 @@ static CC_NOINLINE cc_bool SoftFP_MapQuadOutsideFrustum(int firstVertex, cc_uint
             py = plane->y < 0.0f ? bounds->minY : bounds->maxY;
             pz = plane->z < 0.0f ? bounds->minZ : bounds->maxZ;
             support = px * plane->x + py * plane->y + pz * plane->z + plane->w;
-            if (support < rejectMargin) return true;
+            if (support < rejectMargin) { outside = true; break; }
         }
-        return false;
+        goto cache_result;
     } else {
         int minX = min(src[0].x, src[2].x), maxX = max(src[0].x, src[2].x);
         int minY = min(src[0].y, src[2].y), maxY = max(src[0].y, src[2].y);
@@ -1434,9 +1495,16 @@ static CC_NOINLINE cc_bool SoftFP_MapQuadOutsideFrustum(int firstVertex, cc_uint
         py = plane->y < 0.0f ? minYf : maxYf;
         pz = plane->z < 0.0f ? minZf : maxZf;
         support = px * plane->x + py * plane->y + pz * plane->z + plane->w;
-        if (support < rejectMargin) return true;
+        if (support < rejectMargin) { outside = true; break; }
     }
-    return false;
+
+cache_result:
+    if (knownBits) {
+        if (outside) resultBits[cacheByte] |= cacheBit;
+        else         resultBits[cacheByte] &= (cc_uint8)~cacheBit;
+        knownBits[cacheByte] |= cacheBit;
+    }
+    return outside;
 }
 #endif
 
@@ -1854,15 +1922,14 @@ static inline void MultiplyColorsInline(PackedCol vColor, SoftTexel tColor,
 static CC_INLINE SoftPixel BlendSoftPixel(int srcR, int srcG, int srcB,
                                           int srcA, SoftPixel dst) {
 #ifdef CC_BUILD_SOFTFP_HALF_ALPHA
-    int outR = (srcR + SoftPixel_R(dst)) >> 1;
-    int outG = (srcG + SoftPixel_G(dst)) >> 1;
-    int outB = (srcB + SoftPixel_B(dst)) >> 1;
+    SoftPixel src = SoftPixel_Make(srcR, srcG, srcB);
+    return (SoftPixel)((src & dst) + (((src ^ dst) & 0xF7DEu) >> 1));
 #else
     int outR = (srcR * srcA + SoftPixel_R(dst) * (255 - srcA)) >> 8;
     int outG = (srcG * srcA + SoftPixel_G(dst) * (255 - srcA)) >> 8;
     int outB = (srcB * srcA + SoftPixel_B(dst) * (255 - srcA)) >> 8;
-#endif
     return SoftPixel_Make(outR, outG, outB);
+#endif
 }
 
 #ifdef SOFTFP_GROUPED_RASTER
@@ -1976,6 +2043,64 @@ static CC_INLINE void SoftFP_RecordTerrainCoverage(int x, int y) {
     maxDepth = max(maxDepth, terrainHiZ4[coverageBase + SOFTFP_COVERAGE_COLS]);
     maxDepth = max(maxDepth, terrainHiZ4[coverageBase + SOFTFP_COVERAGE_COLS + 1]);
     terrainHiZ[hizY * SOFTFP_HIZ_COLS + hizX] = maxDepth;
+}
+
+static CC_NOINLINE void DrawCoarseAffineSpan(int y, int minX, int maxX,
+                                             int w, int u, int v,
+                                             int stepW, int stepU, int stepV,
+                                             int sampleShift,
+                                             const SoftTexel* texture,
+                                             int textureHeightMask,
+                                             const TerrainTintTable* tint,
+                                             int tintR, int tintG, int tintB) {
+    DepthValue* depth = depthBuffer + y * db_stride + minX;
+    int sampleStep = 1 << sampleShift;
+    int x = minX;
+    cc_uint32 groups = 0, pixels = 0;
+
+    while (x <= maxX) {
+        int count = min(sampleStep, maxX - x + 1);
+        int sampleOffset = count >> 1;
+        int sampleW = w + stepW * sampleOffset;
+        int visibleMask = 0;
+        DepthValue z;
+        int i;
+
+        if (sampleW > 0) {
+            z = EncodeWDepth8(sampleW);
+            for (i = 0; i < count; i++) {
+                if (z <= depth[i]) visibleMask |= 1 << i;
+            }
+            if (visibleMask) {
+                int sampleU = u + stepU * sampleOffset;
+                int sampleV = v + stepV * sampleOffset;
+                int texX = FixedToInt(sampleU) & texWidthMask;
+                int texY = FixedToInt(sampleV) & textureHeightMask;
+                SoftTexel texel = texture[texY * curTexWidth + texX];
+
+                if (texel & SOFT_TEXEL_A_MASK) {
+                    SoftPixel color = tint ? SoftPixel_FromTintTable(texel, tint) :
+                        SoftPixel_FromTexelTint(texel, tintR, tintG, tintB);
+#ifdef CC_BUILD_SOFTFP_FOG4
+                    color = ApplyFog4(color, sampleW, NULL);
+#endif
+                    for (i = 0; i < count; i++) {
+                        if (!(visibleMask & (1 << i))) continue;
+                        depth[i] = z;
+                        SoftFP_RecordTerrainCoverage(x + i, y);
+                        StoreRasterGroup(x + i, y, color);
+                    }
+                }
+            }
+        }
+        x += count; depth += count;
+        w += stepW * count;
+        u += stepU * count;
+        v += stepV * count;
+        groups++; pixels += (cc_uint32)count;
+    }
+    rasterCoarseGroups += groups;
+    rasterCoarsePixels += pixels;
 }
 
 static CC_INLINE cc_bool SoftFP_RectOccluded(int minX, int minY, int maxX, int maxY,
@@ -2291,6 +2416,14 @@ static CC_NOINLINE void DrawTriangleFastTerrain(VertexFixed* V0, VertexFixed* V1
         u_interp = FixedMul(ic0, u0) + FixedMul(ic1, u1) + FixedMul(ic2, u2);
         v_interp = FixedMul(ic0, v0) + FixedMul(ic1, v1) + FixedMul(ic2, v2);
 
+        if (perspectiveShift <= -2) {
+            DrawCoarseAffineSpan(y, spanMinX, spanMaxX,
+                w_interp, u_interp, v_interp, step_w, step_u, step_v,
+                -perspectiveShift - 1, curTexPixels, texHeightMask,
+                tintTable, r1, g1, b1);
+            continue;
+        }
+
         fastDepth = depthBuffer + y * db_stride + spanMinX;
 
         for (x = spanMinX; x <= spanMaxX; x++, fastDepth++) {
@@ -2549,6 +2682,14 @@ static CC_NOINLINE void DrawQuadFastTerrain(VertexFixed quad[4], int area,
             spanPixelsLocal += (cc_uint32)(spanMaxX - spanMinX + 1);
             if (perspective) perspectivePixelsLocal += (cc_uint32)(spanMaxX - spanMinX + 1);
 
+            if (perspectiveShift <= -2) {
+                DrawCoarseAffineSpan(y, spanMinX, spanMaxX,
+                    w_interp, u_interp, v_interp, step_w, step_u, step_v,
+                    -perspectiveShift - 1, quadTexPixels, quadTexHeightMask,
+                    tintTable, r1, g1, b1);
+                goto next_quad_terrain_row;
+            }
+
             for (x = spanMinX; x <= spanMaxX; x++, fastDepth++) {
                 DepthValue fastZ;
                 if (w_interp <= 0) goto next_quad_terrain_pixel;
@@ -2638,6 +2779,7 @@ next_quad_terrain_pixel:
             }
         }
 
+next_quad_terrain_row:
         bc0_start += dy12; bc1_start += dy20; bc2_start += dy01;
         for (i = 0; i < 4; i++) edgeStart[i] += edgeStepY[i];
     }
@@ -3306,9 +3448,9 @@ static void DrawTriangle2D(VertexFixed* V0, VertexFixed* V1, VertexFixed* V2) {
 
 
 static void ProcessClippedTriangleAndDraw(VertexFixed* inVerts, int polyCount,
-                                          cc_bool optimizeMap, cc_bool forceAffine) {
+                                          cc_bool optimizeMap, int affineShift) {
     int i;
-    int perspectiveShift = forceAffine ? -1 : 2;
+    int perspectiveShift = affineShift >= 0 ? -(affineShift + 1) : 2;
 #ifdef CC_BUILD_SOFTFP_PERSPECTIVE4
     int minW = INT_MAX;
 #endif
@@ -3330,7 +3472,7 @@ static void ProcessClippedTriangleAndDraw(VertexFixed* inVerts, int polyCount,
     }
 
 #ifdef CC_BUILD_SOFTFP_PERSPECTIVE4
-    if (optimizeMap && !forceAffine) perspectiveShift = 0;
+    if (optimizeMap && affineShift < 0) perspectiveShift = 0;
 #endif
 
 #ifdef SOFTFP_FAST_TERRAIN_KERNEL
@@ -3558,14 +3700,14 @@ static CC_INLINE cc_uint32 VertexClipOutcode(const VertexFixed* vertex,
 }
 
 static void DrawClippedFixed(VertexFixed quad[4], cc_uint32 planeMask,
-                             cc_bool optimizeMap, cc_bool forceAffine) {
+                             cc_bool optimizeMap, int affineShift) {
 	VertexFixed buf1[16], buf2[16];
     VertexFixed* outPoly;
     cc_uint32 clipOr = 0, clipAnd = planeMask;
     int i;
 
     if (!planeMask) {
-        ProcessClippedTriangleAndDraw(quad, 4, optimizeMap, forceAffine);
+        ProcessClippedTriangleAndDraw(quad, 4, optimizeMap, affineShift);
         return;
     }
 
@@ -3576,13 +3718,13 @@ static void DrawClippedFixed(VertexFixed quad[4], cc_uint32 planeMask,
     }
     if (clipAnd) return;
     if (!clipOr) {
-        ProcessClippedTriangleAndDraw(quad, 4, optimizeMap, forceAffine);
+        ProcessClippedTriangleAndDraw(quad, 4, optimizeMap, affineShift);
         return;
     }
 
     int polyCount = ClipQuadToFrustumFixed(quad, buf1, buf2, &outPoly, clipOr);
     if (polyCount > 0) {
-        ProcessClippedTriangleAndDraw(outPoly, polyCount, optimizeMap, forceAffine);
+        ProcessClippedTriangleAndDraw(outPoly, polyCount, optimizeMap, affineShift);
     }
 }
 
@@ -3624,7 +3766,11 @@ void DrawQuadsFixed(int startVertex, int verticesCount, DrawHints hints) {
     } else {
 		cc_uint32 clipPlaneMask = (1u << NUM_PLANES) - 1u;
 		cc_bool optimizeMap = false;
-		cc_bool forceAffine = (hints & DRAW_HINT_AFFINE) != 0;
+		int affineShift = -1;
+		if (hints & DRAW_HINT_AFFINE) {
+			affineShift = hints & DRAW_HINT_COARSE4 ? 2 :
+				(hints & DRAW_HINT_COARSE2 ? 1 : 0);
+		}
 #ifdef CC_BUILD_SOFTFP_QUAD_FRUSTUM_CULL
 		optimizeMap = (hints & SOFTFP_MAP_BATCH_HINT) != 0;
 		if (optimizeMap) {
@@ -3657,7 +3803,7 @@ void DrawQuadsFixed(int startVertex, int verticesCount, DrawHints hints) {
             TransformVertex3D(j + 2, &vertices[2], optimizeMap);
             TransformVertex3D(j + 3, &vertices[3], optimizeMap);
             
-            DrawClippedFixed(vertices, clipPlaneMask, optimizeMap, forceAffine);
+            DrawClippedFixed(vertices, clipPlaneMask, optimizeMap, affineShift);
         }
 		}
 
@@ -3731,6 +3877,10 @@ void Gfx_EndFrame(void) {
     holo_perf_add(HOLO_PERF_PERSPECTIVE_TRIANGLES, rasterPerspectiveTriangles);
     holo_perf_add(HOLO_PERF_PERSPECTIVE_PIXELS, rasterPerspectivePixels);
     holo_perf_add(HOLO_PERF_PERSPECTIVE_RECIPROCALS, rasterPerspectiveReciprocals);
+    holo_perf_add(HOLO_PERF_COARSE_GROUPS, rasterCoarseGroups);
+    holo_perf_add(HOLO_PERF_COARSE_PIXELS, rasterCoarsePixels);
+    holo_perf_add(HOLO_PERF_FRUSTUM_CACHE_HIT, rasterFrustumCacheHits);
+    holo_perf_add(HOLO_PERF_FRUSTUM_CACHE_MISS, rasterFrustumCacheMisses);
     holo_perf_add(HOLO_PERF_RASTER_QUADS, rasterTerrainQuads);
     holo_perf_add(HOLO_PERF_SPRITE_QUADS, rasterSpriteQuads);
     holo_perf_add(HOLO_PERF_SPRITE_CULL, rasterSpriteCull);
@@ -3925,8 +4075,9 @@ void Gfx_OnWindowResize(int width, int height) {
 #endif
 #endif
 #ifdef CC_BUILD_SOFTFP_QUAD_FRUSTUM_CULL
-    Platform_LogConst("[cc.gfx] frontend=map-only quad-raster diagonal-AABB cull packed-local/8 bounds=6B edge=20.12");
+    Platform_LogConst("[cc.gfx] frontend=map-only quad-raster AABB cull-cache packed-local/8 Hi-Z4/8");
 #endif
+    Platform_LogConst("[cc.gfx] far-lod=horizontal 3/5,9/10 view coarse=2,4 affine");
 #ifdef CC_BUILD_SOFTFP_TERRAIN_TILE_CACHE
     if (terrainTileCacheMemory) {
         Platform_LogConst("[cc.gfx] terrain-texture-cache=8x16x16 A1RGB555 internal");
