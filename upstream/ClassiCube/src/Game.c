@@ -887,6 +887,12 @@ void Game_RenderFrame(void) {
 	Gfx_EndFrame();
 #ifdef CC_BUILD_ESP32S3
 	holo_perf_add(HOLO_PERF_PRESENT, Stopwatch_ElapsedMicroseconds(perfMark, Stopwatch_Measure()));
+	holo_perf_set_pose((int32_t)(Camera.CurrentPos.x * 100.0f),
+		(int32_t)(Camera.CurrentPos.y * 100.0f),
+		(int32_t)(Camera.CurrentPos.z * 100.0f),
+		(int32_t)(Entities.CurPlayer->Base.Yaw * 100.0f),
+		(int32_t)(Entities.CurPlayer->Base.Pitch * 100.0f),
+		(uint32_t)ICOUNT(Game_Vertices));
 #endif
 	if (gfx_minFrameMs != 0.0f) LimitFPS();
 #ifdef CC_BUILD_ESP32S3

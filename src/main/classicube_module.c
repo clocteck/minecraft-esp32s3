@@ -118,7 +118,7 @@ static void classicube_task(void *arg)
     ClassiCubeInstance *instance = (ClassiCubeInstance *)arg;
     if (!instance) return;
     instance->running = 1;
-    holo_port_log("[classicube.so] game task started (320x240 SoftFP, perspective spans)");
+    holo_port_log("[classicube.so] game task started (192x144 SoftFP, Hi-Z4/8 + packed scale + tint LUT)");
     instance->last_result = ClassiCube_HoloMain();
     holo_port_reset_input();
     holo_port_display_release();
@@ -233,7 +233,7 @@ static int l_info(lua_State *L)
     set_integer(L, "width", CLASSICUBE_RENDER_WIDTH);
     set_integer(L, "height", CLASSICUBE_RENDER_HEIGHT);
     set_integer(L, "input_mask", input.buttons);
-    set_string(L, "renderer", "SoftFP adaptive perspective/4/8/16 reciprocal-W Z8 RGB565 192x144 scaled");
+    set_string(L, "renderer", "SoftFP quad/chunk Hi-Z4/8 packed-scale tint-LUT axis-near perspective/4/8/16/32 reciprocal-W Z8 RGB565 192x144");
     set_boolean(L, "audio_active", Audio_HoloActive() != 0);
     set_integer(L, "audio_blocks", Audio_HoloMixedBlocks());
     set_integer(L, "audio_voices", Audio_HoloActiveVoices());

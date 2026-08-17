@@ -116,8 +116,14 @@ static void CheckWeather(float delta) {
 
 #ifdef CC_CLIPPING_FLAGS
 	#define DrawBatch(count, start) Gfx_DrawIndexedTris_T2fC4b(count, start, info->skipClip ? DRAW_HINT_NOCLIP : 0)
+	#define DrawBatchHint(count, start, hint) Gfx_DrawIndexedTris_T2fC4b(count, start, \
+		(DrawHints)((info->skipClip ? DRAW_HINT_NOCLIP : 0) | (hint)))
+	#define DrawSpriteBatch(count, start) Gfx_DrawIndexedTris_T2fC4b(count, start, \
+		(DrawHints)((info->skipClip ? DRAW_HINT_NOCLIP : 0) | DRAW_HINT_SPRITE))
 #else
 	#define DrawBatch(count, start) Gfx_DrawIndexedTris_T2fC4b(count, start, 0)
+	#define DrawBatchHint(count, start, hint) Gfx_DrawIndexedTris_T2fC4b(count, start, hint)
+	#define DrawSpriteBatch(count, start) Gfx_DrawIndexedTris_T2fC4b(count, start, DRAW_HINT_SPRITE)
 #endif
 
 #if CC_GFX_BACKEND == CC_GFX_BACKEND_GL11
@@ -125,9 +131,26 @@ static void CheckWeather(float delta) {
 	#define DrawFaces(f1, f2, ign) DrawFace(f1, ign); DrawFace(f2, ign);
 #else
 	#define DrawFace(face, offset)    DrawBatch(part.counts[face], offset);
+	#define DrawFaceHint(face, offset, hint) DrawBatchHint(part.counts[face], offset, hint);
 	#define DrawFaces(f1, f2, offset) DrawBatch(part.counts[f1] + part.counts[f2], offset);
 #endif
 
+#if defined CC_BUILD_ESP32S3 && CC_GFX_BACKEND != CC_GFX_BACKEND_GL11
+#define DrawNormalFaces(minFace, maxFace) \
+if (drawMin && drawMax) { \
+	Gfx_SetFaceCulling(true); \
+	DrawFaceHint(minFace, offset, DRAW_HINT_NONE); \
+	DrawFaceHint(maxFace, offset + part.counts[minFace], DRAW_HINT_REVERSE); \
+	Gfx_SetFaceCulling(false); \
+	Game_Vertices += (part.counts[minFace] + part.counts[maxFace]); \
+} else if (drawMin) { \
+	DrawFaceHint(minFace, offset, DRAW_HINT_NONE); \
+	Game_Vertices += part.counts[minFace]; \
+} else if (drawMax) { \
+	DrawFaceHint(maxFace, offset + part.counts[minFace], DRAW_HINT_REVERSE); \
+	Game_Vertices += part.counts[maxFace]; \
+}
+#else
 #define DrawNormalFaces(minFace, maxFace) \
 if (drawMin && drawMax) { \
 	Gfx_SetFaceCulling(true); \
@@ -141,6 +164,7 @@ if (drawMin && drawMax) { \
 	DrawFace(maxFace, offset + part.counts[minFace]); \
 	Game_Vertices += part.counts[maxFace]; \
 }
+#endif
 
 static void RenderNormalBatch(int batch) {
 	int batchOffset = chunksCount * batch;
@@ -157,15 +181,65 @@ static void RenderNormalBatch(int batch) {
 		if (part.offset < 0) continue;
 		hasNormParts[batch] = true;
 
-#if CC_GFX_BACKEND != CC_GFX_BACKEND_GL11
-		Gfx_BindVb_Textured(info->vb);
-#endif
 #if defined CC_BUILD_ESP32S3 && defined CC_BUILD_SOFTFP_QUAD_FRUSTUM_CULL
 		Gfx_SetMapClipPlanes(info->softClipPlanes);
 		Gfx_BindMapCullBounds(info->softCullBounds,
 			info->centreX - 8, info->centreY - 8, info->centreZ - 8);
+		if (Gfx_IsBoundMapOccluded()) continue;
+#endif
+#if CC_GFX_BACKEND != CC_GFX_BACKEND_GL11
+		Gfx_BindVb_Textured(info->vb);
 #endif
 
+#if defined CC_BUILD_ESP32S3 && CC_GFX_BACKEND != CC_GFX_BACKEND_GL11
+		{
+			int axisOrder[3] = { 0, 1, 2 }; /* X, Z, Y */
+			int axisDistance[3];
+			int axisOffset[3];
+			int a, b;
+
+			/* The chunk list is already near-to-far, but faces inside each chunk
+			 * used to be fixed X/Z/Y. Draw the nearest face axis first so a camera
+			 * above the terrain establishes top-surface depth before side walls. */
+			axisDistance[0] = Math_AbsI((int)Camera.CurrentPos.x - info->centreX);
+			axisDistance[1] = Math_AbsI((int)Camera.CurrentPos.z - info->centreZ);
+			axisDistance[2] = Math_AbsI((int)Camera.CurrentPos.y - info->centreY);
+			axisOffset[0] = part.offset + part.spriteCount;
+			axisOffset[1] = axisOffset[0] + part.counts[FACE_XMIN] + part.counts[FACE_XMAX];
+			axisOffset[2] = axisOffset[1] + part.counts[FACE_ZMIN] + part.counts[FACE_ZMAX];
+
+			for (a = 0; a < 2; a++) {
+				for (b = a + 1; b < 3; b++) {
+					if (axisDistance[axisOrder[b]] > axisDistance[axisOrder[a]]) {
+						int swap = axisOrder[a]; axisOrder[a] = axisOrder[b]; axisOrder[b] = swap;
+					}
+				}
+			}
+
+			for (a = 0; a < 3; a++) {
+				switch (axisOrder[a]) {
+				case 0:
+					offset  = axisOffset[0];
+					drawMin = info->drawXMin && part.counts[FACE_XMIN];
+					drawMax = info->drawXMax && part.counts[FACE_XMAX];
+					DrawNormalFaces(FACE_XMIN, FACE_XMAX);
+					break;
+				case 1:
+					offset  = axisOffset[1];
+					drawMin = info->drawZMin && part.counts[FACE_ZMIN];
+					drawMax = info->drawZMax && part.counts[FACE_ZMAX];
+					DrawNormalFaces(FACE_ZMIN, FACE_ZMAX);
+					break;
+				default:
+					offset  = axisOffset[2];
+					drawMin = info->drawYMin && part.counts[FACE_YMIN];
+					drawMax = info->drawYMax && part.counts[FACE_YMAX];
+					DrawNormalFaces(FACE_YMIN, FACE_YMAX);
+					break;
+				}
+			}
+		}
+#else
 		offset  = part.offset + part.spriteCount;
 		drawMin = info->drawXMin && part.counts[FACE_XMIN];
 		drawMax = info->drawXMax && part.counts[FACE_XMAX];
@@ -180,6 +254,7 @@ static void RenderNormalBatch(int batch) {
 		drawMin = info->drawYMin && part.counts[FACE_YMIN];
 		drawMax = info->drawYMax && part.counts[FACE_YMAX];
 		DrawNormalFaces(FACE_YMIN, FACE_YMAX);
+#endif
 
 		if (!part.spriteCount) continue;
 		offset = part.offset;
@@ -194,21 +269,50 @@ static void RenderNormalBatch(int batch) {
 		Gfx_SetFaceCulling(false);
 		continue;
 #endif
+#ifdef CC_BUILD_ESP32S3
+		{
+			/* Each plant contains both windings of two crossed planes. A chunk's
+			 * old axis-OR test submits three (and sometimes all four) windings,
+			 * leaving the rasterizer to reject the extras. Select one winding
+			 * whenever every sprite in this 16x16 chunk is provably on the same
+			 * side of the diagonal plane; retain both near a diagonal boundary. */
+			float relX = Camera.CurrentPos.x - info->centreX;
+			float relZ = Camera.CurrentPos.z - info->centreZ;
+			float diagonal = relX - relZ;
+			float antiDiagonal = relX + relZ;
+
+			if (diagonal >= -16.0f) {
+				DrawSpriteBatch(count, offset); Game_Vertices += count;
+			}
+			if (diagonal <= 16.0f) {
+				DrawSpriteBatch(count, offset + count); Game_Vertices += count;
+			}
+			offset += count * 2;
+
+			if (antiDiagonal <= 16.0f) {
+				DrawSpriteBatch(count, offset); Game_Vertices += count;
+			}
+			if (antiDiagonal >= -16.0f) {
+				DrawSpriteBatch(count, offset + count); Game_Vertices += count;
+			}
+		}
+#else
 		if (info->drawXMax || info->drawZMin) {
-			DrawBatch(count, offset); Game_Vertices += count;
+			DrawSpriteBatch(count, offset); Game_Vertices += count;
 		} offset += count;
 
 		if (info->drawXMin || info->drawZMax) {
-			DrawBatch(count, offset); Game_Vertices += count;
+			DrawSpriteBatch(count, offset); Game_Vertices += count;
 		} offset += count;
 
 		if (info->drawXMin || info->drawZMin) {
-			DrawBatch(count, offset); Game_Vertices += count;
+			DrawSpriteBatch(count, offset); Game_Vertices += count;
 		} offset += count;
 
 		if (info->drawXMax || info->drawZMax) {
-			DrawBatch(count, offset); Game_Vertices += count;
+			DrawSpriteBatch(count, offset); Game_Vertices += count;
 		}
+#endif
 		Gfx_SetFaceCulling(false);
 	}
 }

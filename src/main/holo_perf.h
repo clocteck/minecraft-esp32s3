@@ -25,10 +25,18 @@ typedef enum HoloPerfSlot {
     HOLO_PERF_RASTER_SPAN_PIXELS,
     HOLO_PERF_TEXTURE_REUSE,
     HOLO_PERF_TEXTURE_LOAD,
+    HOLO_PERF_TINT_REUSE,
+    HOLO_PERF_TINT_LOAD,
     HOLO_PERF_PERSPECTIVE_TRIANGLES,
     HOLO_PERF_PERSPECTIVE_PIXELS,
     HOLO_PERF_PERSPECTIVE_RECIPROCALS,
     HOLO_PERF_RASTER_QUADS,
+    HOLO_PERF_SPRITE_QUADS,
+    HOLO_PERF_SPRITE_CULL,
+    HOLO_PERF_HIZ_TESTS,
+    HOLO_PERF_HIZ_CULL,
+    HOLO_PERF_CHUNK_HIZ_TESTS,
+    HOLO_PERF_CHUNK_HIZ_CULL,
     HOLO_PERF_PROJECTED_VERTICES,
     HOLO_PERF_PROJECTION_REUSE,
     HOLO_PERF_FAST_CUTOUT_PIXELS,
@@ -47,5 +55,7 @@ void holo_perf_count_triangles(uint32_t count);
 void holo_perf_count_bbox_pixels(uint64_t count);
 void holo_perf_count_chunk_build(void);
 void holo_perf_count_dma_submit(void);
+void holo_perf_set_pose(int32_t x100, int32_t y100, int32_t z100,
+                        int32_t yaw100, int32_t pitch100, uint32_t hud_vertices);
 
 #endif

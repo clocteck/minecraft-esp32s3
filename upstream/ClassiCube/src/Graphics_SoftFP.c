@@ -159,10 +159,10 @@ static int db_stride, db_height;
 static int raster_width  = CLASSICUBE_3D_WIDTH;
 static int raster_height = CLASSICUBE_3D_HEIGHT;
 static int vp_raster_hwidth_fp, vp_raster_hheight_fp;
-static cc_uint16 raster_to_color_x[CLASSICUBE_3D_WIDTH];
-static cc_uint16 raster_to_color_width[CLASSICUBE_3D_WIDTH];
-static cc_uint32 raster_to_color_row[CLASSICUBE_3D_HEIGHT];
-static cc_uint16 raster_to_color_height[CLASSICUBE_3D_HEIGHT];
+#define RASTER_GROUP_DOUBLE_X 0x8000u
+#define RASTER_GROUP_DOUBLE_Y 0x80000000u
+static cc_uint16 raster_to_color_xw[CLASSICUBE_3D_WIDTH];
+static cc_uint32 raster_to_color_rowh[CLASSICUBE_3D_HEIGHT];
 #define SOFTFP_GROUPED_RASTER
 #endif
 #ifdef CC_BUILD_SOFTFP_TERRAIN_TILE_CACHE
@@ -174,16 +174,39 @@ static void* terrainTileCacheMemory;
 #if defined CC_BUILD_SOFTFP_FAST_CUTOUT && defined CC_BUILD_SOFTFP_PERSPECTIVE4 && \
     defined CC_BUILD_SOFTFP_W_DEPTH8 && defined CC_BUILD_SOFTFP_LOWRES_RASTER && \
     defined CC_BUILD_SOFTFP_TEX16 && defined CC_BUILD_SOFTFP_FB16
+#if (CLASSICUBE_3D_WIDTH & 7) || (CLASSICUBE_3D_HEIGHT & 7)
+#error "Terrain Hi-Z requires the fixed 3D dimensions to be divisible by 8"
+#endif
 #define SOFTFP_FAST_TERRAIN_KERNEL
+#define SOFTFP_COVERAGE_SHIFT 2
+#define SOFTFP_HIZ_SHIFT 3
+#define SOFTFP_COVERAGE_COLS (CLASSICUBE_3D_WIDTH  >> SOFTFP_COVERAGE_SHIFT)
+#define SOFTFP_COVERAGE_ROWS (CLASSICUBE_3D_HEIGHT >> SOFTFP_COVERAGE_SHIFT)
+#define SOFTFP_HIZ_COLS      (CLASSICUBE_3D_WIDTH  >> SOFTFP_HIZ_SHIFT)
+#define SOFTFP_HIZ_ROWS      (CLASSICUBE_3D_HEIGHT >> SOFTFP_HIZ_SHIFT)
+#define TERRAIN_TINT_CACHE_SLOTS 8
+typedef struct TerrainTintTable {
+    cc_uint32 key;
+    SoftPixel r[32], g[32], b[32];
+} TerrainTintTable;
+static cc_uint16 terrainCoverage[SOFTFP_COVERAGE_COLS * SOFTFP_COVERAGE_ROWS];
+static DepthValue terrainHiZ4[SOFTFP_COVERAGE_COLS * SOFTFP_COVERAGE_ROWS];
+static DepthValue terrainHiZ[SOFTFP_HIZ_COLS * SOFTFP_HIZ_ROWS];
+static TerrainTintTable* terrainTintCache;
+static cc_uint8 terrainTintCacheNext;
+static cc_uint32 terrainTintCacheHits, terrainTintCacheMisses;
 #endif
 #ifdef CC_BUILD_SOFTFP_QUAD_FRUSTUM_CULL
-#define SOFTFP_MAP_BATCH_HINT ((DrawHints)0x08)
+#define SOFTFP_MAP_BATCH_HINT ((DrawHints)0x10)
 #endif
 #ifdef CC_BUILD_ESP32S3
 static cc_uint64 rasterBboxPixels, rasterSpanPixels;
 static cc_uint64 rasterPerspectiveTriangles, rasterPerspectivePixels;
 static cc_uint64 rasterPerspectiveReciprocals;
 static cc_uint64 rasterTerrainQuads;
+static cc_uint64 rasterSpriteQuads, rasterSpriteCull;
+static cc_uint64 rasterHiZTests, rasterHiZCull;
+static cc_uint64 rasterChunkHiZTests, rasterChunkHiZCull;
 static cc_uint64 rasterProjectedVertices, rasterProjectionReuse;
 /* These two diagnostics update on every visible pixel and cost about 0.7 ms
  * per frame on ESP32-S3. Define this only for short profiling builds. */
@@ -364,8 +387,24 @@ void Gfx_Create(void) {
     }
 #endif
 #ifdef CC_BUILD_SOFTFP_TERRAIN_TILE_CACHE
-    terrainTileCacheMemory = holo_port_buffer(
-        TERRAIN_TILE_CACHE_SLOTS * TERRAIN_TILE_PIXELS * sizeof(cc_uint16), 3);
+    {
+        const size_t tileBytes = TERRAIN_TILE_CACHE_SLOTS * TERRAIN_TILE_PIXELS * sizeof(cc_uint16);
+#ifdef SOFTFP_FAST_TERRAIN_KERNEL
+        cc_uint8* cacheMemory = (cc_uint8*)holo_port_buffer(
+            tileBytes + TERRAIN_TINT_CACHE_SLOTS * sizeof(TerrainTintTable), 3);
+        terrainTileCacheMemory = cacheMemory;
+        terrainTintCache = cacheMemory ? (TerrainTintTable*)(cacheMemory + tileBytes) : NULL;
+        terrainTintCacheNext = 0;
+        terrainTintCacheHits = terrainTintCacheMisses = 0;
+        if (terrainTintCache) {
+            Mem_Set(terrainTintCache, 0xFF,
+                    TERRAIN_TINT_CACHE_SLOTS * sizeof(TerrainTintTable));
+            Platform_LogConst("[cc.gfx] tint LUT=8x196 internal");
+        }
+#else
+        terrainTileCacheMemory = holo_port_buffer(tileBytes, 3);
+#endif
+    }
 #endif
 }
 
@@ -488,6 +527,41 @@ static SoftTexel* TerrainTileCache_Get(int tileIndex) {
     textureSampleLoads++;
     return pixels + slot * TERRAIN_TILE_PIXELS;
 }
+
+#ifdef SOFTFP_FAST_TERRAIN_KERNEL
+static const TerrainTintTable* TerrainTintCache_Get(int tintR, int tintG, int tintB) {
+    cc_uint32 key = ((cc_uint32)tintR << 16) | ((cc_uint32)tintG << 8) | (cc_uint32)tintB;
+    TerrainTintTable* table;
+    int i, slot;
+
+    if (!terrainTintCache) return NULL;
+    for (i = 0; i < TERRAIN_TINT_CACHE_SLOTS; i++) {
+        if (terrainTintCache[i].key == key) {
+            terrainTintCacheHits++;
+            return &terrainTintCache[i];
+        }
+    }
+
+    slot = terrainTintCacheNext++ & (TERRAIN_TINT_CACHE_SLOTS - 1);
+    table = &terrainTintCache[slot];
+    table->key = key;
+    for (i = 0; i < 32; i++) {
+        int expanded = (i << 3) | (i >> 2);
+        table->r[i] = (SoftPixel)(((tintR * expanded) >> 11) << 11);
+        table->g[i] = (SoftPixel)(((tintG * expanded) >> 10) << 5);
+        table->b[i] = (SoftPixel)( (tintB * expanded) >> 11);
+    }
+    terrainTintCacheMisses++;
+    return table;
+}
+
+static CC_INLINE SoftPixel SoftPixel_FromTintTable(SoftTexel texture,
+                                                    const TerrainTintTable* table) {
+    return (SoftPixel)(table->r[(texture >> 10) & 0x1F] |
+                       table->g[(texture >>  5) & 0x1F] |
+                       table->b[ texture        & 0x1F]);
+}
+#endif
 #endif
 #ifdef CC_BUILD_SOFTFP_HOT_ATLAS
 static CCTexture* hotAtlasOwner;
@@ -688,6 +762,9 @@ static void ClearDepthBuffer(void) {
     rasterPerspectiveTriangles = rasterPerspectivePixels = 0;
     rasterPerspectiveReciprocals = 0;
     rasterTerrainQuads = 0;
+    rasterSpriteQuads = rasterSpriteCull = 0;
+    rasterHiZTests = rasterHiZCull = 0;
+    rasterChunkHiZTests = rasterChunkHiZCull = 0;
     rasterProjectedVertices = rasterProjectionReuse = 0;
 #ifdef CC_BUILD_SOFTFP_PIXEL_PROBES
     rasterFastCutoutPixels = 0;
@@ -699,6 +776,9 @@ static void ClearDepthBuffer(void) {
 #if defined CC_BUILD_SOFTFP_TEXEL_2X2 || defined CC_BUILD_SOFTFP_TERRAIN_TILE_CACHE
     textureSampleReuse = textureSampleLoads = 0;
 #endif
+#ifdef SOFTFP_FAST_TERRAIN_KERNEL
+    terrainTintCacheHits = terrainTintCacheMisses = 0;
+#endif
 #endif
 #ifdef CC_BUILD_SOFTFP_Z16_TILES
     if (depthCachePixels) {
@@ -708,6 +788,11 @@ static void ClearDepthBuffer(void) {
     }
 #elif defined CC_BUILD_SOFTFP_W_DEPTH8
     Mem_Set(depthBuffer, DEPTH_CLEAR_VALUE, db_stride * db_height);
+#ifdef SOFTFP_FAST_TERRAIN_KERNEL
+    Mem_Set(terrainCoverage, 0, sizeof(terrainCoverage));
+    Mem_Set(terrainHiZ4, DEPTH_CLEAR_VALUE, sizeof(terrainHiZ4));
+    Mem_Set(terrainHiZ, DEPTH_CLEAR_VALUE, sizeof(terrainHiZ));
+#endif
 #else
 #ifdef CC_BUILD_SOFTFP_Z32_FASTCLEAR
     Mem_Set(depthBuffer, 0xFF, db_stride * db_height * sizeof(DepthValue));
@@ -786,12 +871,19 @@ typedef struct SoftFPMapQuadBounds {
     cc_uint8 minX, minY, minZ;
     cc_uint8 maxX, maxY, maxZ;
 } SoftFPMapQuadBounds;
+typedef struct SoftFPMapCullData {
+    SoftFPMapQuadBounds aggregate;
+    SoftFPMapQuadBounds quads[1];
+} SoftFPMapCullData;
+static const SoftFPMapCullData* gfx_mapCullData;
 static const SoftFPMapQuadBounds* gfx_mapCullBounds;
 static SoftFPClipPlane mapCullLocalPlanes[NUM_PLANES];
+static int gfx_mapCullOriginX, gfx_mapCullOriginY, gfx_mapCullOriginZ;
 
 void* Gfx_CreateMapCullBounds(GfxResourceID vb, int verticesCount,
                               int originX, int originY, int originZ) {
     const struct FPVertexTextured* src = (const struct FPVertexTextured*)vb;
+    SoftFPMapCullData* data;
     SoftFPMapQuadBounds* bounds;
     int quadCount = verticesCount >> 2;
     const int quantStep = FP_ONE >> 3;
@@ -799,16 +891,20 @@ void* Gfx_CreateMapCullBounds(GfxResourceID vb, int verticesCount,
     int i;
 
     if (!src || quadCount <= 0) return NULL;
-    bytes = (cc_uint32)quadCount * (cc_uint32)sizeof(*bounds);
-    bounds = NULL;
+    bytes = (cc_uint32)sizeof(*data) +
+            (cc_uint32)(quadCount - 1) * (cc_uint32)sizeof(data->quads[0]);
+    data = NULL;
     /* Reuse otherwise idle space in the already-reserved internal hot arena,
      * while retaining a small tail for late dynamic UI/model vertex buffers. */
     if (holo_port_hot_vb_reserved() >=
         holo_port_hot_vb_used() + bytes + 512u) {
-        bounds = (SoftFPMapQuadBounds*)holo_port_hot_vb_alloc(bytes);
+        data = (SoftFPMapCullData*)holo_port_hot_vb_alloc(bytes);
     }
-    if (!bounds) bounds = (SoftFPMapQuadBounds*)Mem_TryAlloc(1, bytes);
-    if (!bounds) return NULL;
+    if (!data) data = (SoftFPMapCullData*)Mem_TryAlloc(1, bytes);
+    if (!data) return NULL;
+    bounds = data->quads;
+    data->aggregate.minX = data->aggregate.minY = data->aggregate.minZ = 0xFF;
+    data->aggregate.maxX = data->aggregate.maxY = data->aggregate.maxZ = 0;
 
     for (i = 0; i < quadCount; i++, src += 4) {
         int minX = min(src[0].x, src[2].x), maxX = max(src[0].x, src[2].x);
@@ -827,7 +923,7 @@ void* Gfx_CreateMapCullBounds(GfxResourceID vb, int verticesCount,
         if (localMinX < 0 || localMaxX > (16LL << FP_SHIFT) ||
             localMinY < 0 || localMaxY > (16LL << FP_SHIFT) ||
             localMinZ < 0 || localMaxZ > (16LL << FP_SHIFT)) {
-            if (!holo_port_hot_vb_free(bounds)) Mem_Free(bounds);
+            if (!holo_port_hot_vb_free(data)) Mem_Free(data);
             return NULL;
         }
 
@@ -840,20 +936,31 @@ void* Gfx_CreateMapCullBounds(GfxResourceID vb, int verticesCount,
         bounds[i].minX = (cc_uint8)qMinX; bounds[i].maxX = (cc_uint8)qMaxX;
         bounds[i].minY = (cc_uint8)qMinY; bounds[i].maxY = (cc_uint8)qMaxY;
         bounds[i].minZ = (cc_uint8)qMinZ; bounds[i].maxZ = (cc_uint8)qMaxZ;
+        data->aggregate.minX = min(data->aggregate.minX, bounds[i].minX);
+        data->aggregate.minY = min(data->aggregate.minY, bounds[i].minY);
+        data->aggregate.minZ = min(data->aggregate.minZ, bounds[i].minZ);
+        data->aggregate.maxX = max(data->aggregate.maxX, bounds[i].maxX);
+        data->aggregate.maxY = max(data->aggregate.maxY, bounds[i].maxY);
+        data->aggregate.maxZ = max(data->aggregate.maxZ, bounds[i].maxZ);
     }
-    return bounds;
+    return data;
 }
 
 void Gfx_DeleteMapCullBounds(void** bounds) {
     void* data = *bounds;
-    if (gfx_mapCullBounds == data) gfx_mapCullBounds = NULL;
+    if (gfx_mapCullData == data) {
+        gfx_mapCullData = NULL;
+        gfx_mapCullBounds = NULL;
+    }
     if (data && !holo_port_hot_vb_free(data)) Mem_Free(data);
     *bounds = NULL;
 }
 
 void Gfx_BindMapCullBounds(void* bounds, int originX, int originY, int originZ) {
     cc_uint8 planes;
-    gfx_mapCullBounds = (const SoftFPMapQuadBounds*)bounds;
+    gfx_mapCullData = (const SoftFPMapCullData*)bounds;
+    gfx_mapCullBounds = gfx_mapCullData ? gfx_mapCullData->quads : NULL;
+    gfx_mapCullOriginX = originX; gfx_mapCullOriginY = originY; gfx_mapCullOriginZ = originZ;
     if (!bounds) return;
 
     /* Convert world-space clip planes to the packed chunk-local 1/8 grid
@@ -1617,57 +1724,38 @@ static CC_INLINE SoftPixel BlendSoftPixel(int srcR, int srcG, int srcB,
 
 #ifdef SOFTFP_GROUPED_RASTER
 static CC_INLINE void StoreRasterGroup(int rasterX, int rasterY, SoftPixel color) {
-    int colorX0 = raster_to_color_x[rasterX];
-    int colorWidth = raster_to_color_width[rasterX];
-    int colorHeight = raster_to_color_height[rasterY];
-    SoftPixel* dst = colorBuffer + raster_to_color_row[rasterY] + colorX0;
-    int x, y;
+    cc_uint32 rowh = raster_to_color_rowh[rasterY];
+    cc_uint16 xw = raster_to_color_xw[rasterX];
+    SoftPixel* dst = colorBuffer + (rowh & ~RASTER_GROUP_DOUBLE_Y) +
+                     (xw & ~RASTER_GROUP_DOUBLE_X);
 
     /* 192x144 -> 320x240 expands one raster sample to at most 2x2 output
-     * pixels. Keep a generic path for other window sizes, while making the
-     * normal per-visible-pixel path branch-only. */
-    if (colorWidth >= 1 && colorWidth <= 2 && colorHeight >= 1 && colorHeight <= 2) {
+     * pixels. Width/height flags share the two precomputed address loads. */
+    dst[0] = color;
+    if (xw & RASTER_GROUP_DOUBLE_X) dst[1] = color;
+    if (rowh & RASTER_GROUP_DOUBLE_Y) {
+        dst += cb_stride;
         dst[0] = color;
-        if (colorWidth == 2) dst[1] = color;
-        if (colorHeight == 2) {
-            dst += cb_stride;
-            dst[0] = color;
-            if (colorWidth == 2) dst[1] = color;
-        }
-        return;
-    }
-
-    for (y = 0; y < colorHeight; y++, dst += cb_stride) {
-        for (x = 0; x < colorWidth; x++) dst[x] = color;
+        if (xw & RASTER_GROUP_DOUBLE_X) dst[1] = color;
     }
 }
 
 static CC_INLINE void BlendRasterGroup(int rasterX, int rasterY,
     int srcR, int srcG, int srcB, int srcA) {
-    int colorX0 = raster_to_color_x[rasterX];
-    int colorWidth = raster_to_color_width[rasterX];
-    int colorHeight = raster_to_color_height[rasterY];
-    SoftPixel* dst = colorBuffer + raster_to_color_row[rasterY] + colorX0;
-    int x, y;
+    cc_uint32 rowh = raster_to_color_rowh[rasterY];
+    cc_uint16 xw = raster_to_color_xw[rasterX];
+    SoftPixel* dst = colorBuffer + (rowh & ~RASTER_GROUP_DOUBLE_Y) +
+                     (xw & ~RASTER_GROUP_DOUBLE_X);
 
-    if (colorWidth >= 1 && colorWidth <= 2 && colorHeight >= 1 && colorHeight <= 2) {
-        dst[0] = BlendSoftPixel(srcR, srcG, srcB, srcA, dst[0]);
-        if (colorWidth == 2) {
-            dst[1] = BlendSoftPixel(srcR, srcG, srcB, srcA, dst[1]);
-        }
-        if (colorHeight == 2) {
-            dst += cb_stride;
-            dst[0] = BlendSoftPixel(srcR, srcG, srcB, srcA, dst[0]);
-            if (colorWidth == 2) {
-                dst[1] = BlendSoftPixel(srcR, srcG, srcB, srcA, dst[1]);
-            }
-        }
-        return;
+    dst[0] = BlendSoftPixel(srcR, srcG, srcB, srcA, dst[0]);
+    if (xw & RASTER_GROUP_DOUBLE_X) {
+        dst[1] = BlendSoftPixel(srcR, srcG, srcB, srcA, dst[1]);
     }
-
-    for (y = 0; y < colorHeight; y++, dst += cb_stride) {
-        for (x = 0; x < colorWidth; x++) {
-            dst[x] = BlendSoftPixel(srcR, srcG, srcB, srcA, dst[x]);
+    if (rowh & RASTER_GROUP_DOUBLE_Y) {
+        dst += cb_stride;
+        dst[0] = BlendSoftPixel(srcR, srcG, srcB, srcA, dst[0]);
+        if (xw & RASTER_GROUP_DOUBLE_X) {
+            dst[1] = BlendSoftPixel(srcR, srcG, srcB, srcA, dst[1]);
         }
     }
 }
@@ -1693,6 +1781,179 @@ static CC_INLINE DepthValue EncodeWDepth8(int inverseW) {
 }
 #endif
 
+#ifdef SOFTFP_FAST_TERRAIN_KERNEL
+static CC_INLINE void SoftFP_RecordTerrainCoverage(int x, int y) {
+    int coverageX = x >> SOFTFP_COVERAGE_SHIFT;
+    int coverageY = y >> SOFTFP_COVERAGE_SHIFT;
+    int coverageIndex = coverageY * SOFTFP_COVERAGE_COLS + coverageX;
+    cc_uint16 mask = terrainCoverage[coverageIndex];
+    int bit, hizX, hizY, coverageBase;
+    int scanX, scanY;
+    DepthValue maxDepth;
+
+    if (mask == 0xFFFFu) return;
+    bit = ((y & 3) << 2) | (x & 3);
+    mask = (cc_uint16)(mask | (cc_uint16)(1u << bit));
+    terrainCoverage[coverageIndex] = mask;
+    if (mask != 0xFFFFu) return;
+
+    /* Build the 4x4 leaf once it becomes fully covered. Its maximum stored
+     * depth is an upper bound forever: later successful depth writes can only
+     * move pixels nearer. */
+    maxDepth = 0;
+    for (scanY = coverageY << SOFTFP_COVERAGE_SHIFT;
+         scanY < (coverageY + 1) << SOFTFP_COVERAGE_SHIFT; scanY++) {
+        const DepthValue* row = depthBuffer + scanY * db_stride +
+                                (coverageX << SOFTFP_COVERAGE_SHIFT);
+        for (scanX = 0; scanX < (1 << SOFTFP_COVERAGE_SHIFT); scanX++) {
+            if (row[scanX] > maxDepth) maxDepth = row[scanX];
+        }
+    }
+    terrainHiZ4[coverageIndex] = maxDepth;
+
+    /* Promote four complete leaves into one cheap 8x8 parent. */
+    hizX = x >> SOFTFP_HIZ_SHIFT;
+    hizY = y >> SOFTFP_HIZ_SHIFT;
+    coverageBase = (hizY << 1) * SOFTFP_COVERAGE_COLS + (hizX << 1);
+    if (terrainCoverage[coverageBase] != 0xFFFFu ||
+        terrainCoverage[coverageBase + 1] != 0xFFFFu ||
+        terrainCoverage[coverageBase + SOFTFP_COVERAGE_COLS] != 0xFFFFu ||
+        terrainCoverage[coverageBase + SOFTFP_COVERAGE_COLS + 1] != 0xFFFFu) return;
+
+    maxDepth = max(terrainHiZ4[coverageBase], terrainHiZ4[coverageBase + 1]);
+    maxDepth = max(maxDepth, terrainHiZ4[coverageBase + SOFTFP_COVERAGE_COLS]);
+    maxDepth = max(maxDepth, terrainHiZ4[coverageBase + SOFTFP_COVERAGE_COLS + 1]);
+    terrainHiZ[hizY * SOFTFP_HIZ_COLS + hizX] = maxDepth;
+}
+
+static CC_INLINE cc_bool SoftFP_RectOccluded(int minX, int minY, int maxX, int maxY,
+                                             DepthValue nearestDepth) {
+    int leafMinX = minX >> SOFTFP_COVERAGE_SHIFT;
+    int leafMinY = minY >> SOFTFP_COVERAGE_SHIFT;
+    int leafMaxX = maxX >> SOFTFP_COVERAGE_SHIFT;
+    int leafMaxY = maxY >> SOFTFP_COVERAGE_SHIFT;
+    int tileMinX = minX >> SOFTFP_HIZ_SHIFT;
+    int tileMinY = minY >> SOFTFP_HIZ_SHIFT;
+    int tileMaxX = maxX >> SOFTFP_HIZ_SHIFT;
+    int tileMaxY = maxY >> SOFTFP_HIZ_SHIFT;
+    int tileX, tileY;
+
+    for (tileY = tileMinY; tileY <= tileMaxY; tileY++) {
+        const DepthValue* parentRow = terrainHiZ + tileY * SOFTFP_HIZ_COLS;
+        for (tileX = tileMinX; tileX <= tileMaxX; tileX++) {
+            int childMinX, childMinY, childMaxX, childMaxY, childX, childY;
+            if (parentRow[tileX] < nearestDepth) continue;
+
+            /* A partially covered 8x8 parent may still fully cover the 4x4
+             * leaves touched by a small quad. Fall back only for that parent. */
+            childMinX = max(leafMinX, tileX << 1);
+            childMinY = max(leafMinY, tileY << 1);
+            childMaxX = min(leafMaxX, (tileX << 1) + 1);
+            childMaxY = min(leafMaxY, (tileY << 1) + 1);
+            for (childY = childMinY; childY <= childMaxY; childY++) {
+                const DepthValue* childRow = terrainHiZ4 + childY * SOFTFP_COVERAGE_COLS;
+                for (childX = childMinX; childX <= childMaxX; childX++) {
+                    /* Equal Z8 values retain normal draw order for coplanar
+                     * surfaces and quantisation ties. */
+                    if (childRow[childX] >= nearestDepth) return false;
+                }
+            }
+        }
+    }
+    return true;
+}
+
+static CC_INLINE cc_bool SoftFP_TerrainQuadOccluded(const VertexFixed quad[4]) {
+    int minX = FixedToInt(min(min(quad[0].x, quad[1].x), min(quad[2].x, quad[3].x)));
+    int minY = FixedToInt(min(min(quad[0].y, quad[1].y), min(quad[2].y, quad[3].y)));
+    int maxX = FixedToInt(max(max(quad[0].x, quad[1].x), max(quad[2].x, quad[3].x)));
+    int maxY = FixedToInt(max(max(quad[0].y, quad[1].y), max(quad[2].y, quad[3].y)));
+    int rasterMaxX = (fb_maxX * raster_width) / fb_width;
+    int rasterMaxY = (fb_maxY * raster_height) / fb_height;
+    int nearestW = max(max(quad[0].w, quad[1].w), max(quad[2].w, quad[3].w));
+    DepthValue nearestDepth;
+
+    if (nearestW <= 0 || maxX < 0 || minX > rasterMaxX ||
+        maxY < 0 || minY > rasterMaxY) return false;
+    minX = max(minX, 0); maxX = min(maxX, rasterMaxX);
+    minY = max(minY, 0); maxY = min(maxY, rasterMaxY);
+    nearestDepth = EncodeWDepth8(nearestW);
+    if (!nearestDepth) return false;
+    return SoftFP_RectOccluded(minX, minY, maxX, maxY, nearestDepth);
+}
+#endif
+
+#if defined SOFTFP_FAST_TERRAIN_KERNEL && defined CC_BUILD_SOFTFP_FLOAT_XFORM
+static cc_bool SoftFP_LocalBoundsOccluded(const SoftFPMapQuadBounds* bounds) {
+    const struct Matrix* m = &_mvp_float;
+    float xs[2], ys[2], zs[2];
+    int minX = INT_MAX, minY = INT_MAX, maxX = INT_MIN, maxY = INT_MIN;
+    int nearestW = 0;
+    int rasterMaxX = (fb_maxX * raster_width) / fb_width;
+    int rasterMaxY = (fb_maxY * raster_height) / fb_height;
+    int nx, ny, nz, ix, iy, iz;
+    DepthValue nearestDepth;
+
+    xs[0] = gfx_mapCullOriginX + bounds->minX * 0.125f;
+    xs[1] = gfx_mapCullOriginX + bounds->maxX * 0.125f;
+    ys[0] = gfx_mapCullOriginY + bounds->minY * 0.125f;
+    ys[1] = gfx_mapCullOriginY + bounds->maxY * 0.125f;
+    zs[0] = gfx_mapCullOriginZ + bounds->minZ * 0.125f;
+    zs[1] = gfx_mapCullOriginZ + bounds->maxZ * 0.125f;
+    nx = bounds->minX == bounds->maxX ? 1 : 2;
+    ny = bounds->minY == bounds->maxY ? 1 : 2;
+    nz = bounds->minZ == bounds->maxZ ? 1 : 2;
+
+    for (iz = 0; iz < nz; iz++) {
+        for (iy = 0; iy < ny; iy++) {
+            for (ix = 0; ix < nx; ix++) {
+                float x = xs[ix], y = ys[iy], z = zs[iz];
+                float clipX = x * m->row1.x + y * m->row2.x + z * m->row3.x + m->row4.x;
+                float clipY = x * m->row1.y + y * m->row2.y + z * m->row3.y + m->row4.y;
+                float clipZ = x * m->row1.z + y * m->row2.z + z * m->row3.z + m->row4.z;
+                float clipW = x * m->row1.w + y * m->row2.w + z * m->row3.w + m->row4.w;
+                int w, invW, xNdc, yNdc, screenX, screenY;
+
+                /* Never query a bound which intersects the near plane. */
+                if (clipZ < 0.0f || clipW <= 0.0f) return false;
+                w = FloatToFixed(clipW);
+                if (w < 64) return false;
+                invW = FixedReciprocalFast(w);
+                if (invW <= 0 || invW > (FP_ONE << 10)) return false;
+                xNdc = FixedMul(FloatToFixed(clipX), invW);
+                yNdc = FixedMul(FloatToFixed(clipY), invW);
+                screenX = vp_raster_hwidth_fp + FixedMul(xNdc, vp_raster_hwidth_fp);
+                screenY = vp_raster_hheight_fp - FixedMul(yNdc, vp_raster_hheight_fp);
+                screenX = FixedToInt(screenX); screenY = FixedToInt(screenY);
+                minX = min(minX, screenX); maxX = max(maxX, screenX);
+                minY = min(minY, screenY); maxY = max(maxY, screenY);
+                nearestW = max(nearestW, invW);
+            }
+        }
+    }
+
+    if (maxX < 0 || minX > rasterMaxX || maxY < 0 || minY > rasterMaxY) return false;
+    minX = max(minX, 0); maxX = min(maxX, rasterMaxX);
+    minY = max(minY, 0); maxY = min(maxY, rasterMaxY);
+    nearestDepth = EncodeWDepth8(nearestW);
+    return nearestDepth && SoftFP_RectOccluded(minX, minY, maxX, maxY, nearestDepth);
+}
+#endif
+
+#if defined CC_BUILD_ESP32S3 && defined CC_BUILD_SOFTFP_QUAD_FRUSTUM_CULL
+cc_bool Gfx_IsBoundMapOccluded(void) {
+#if defined SOFTFP_FAST_TERRAIN_KERNEL && defined CC_BUILD_SOFTFP_FLOAT_XFORM
+    if (!gfx_mapCullData || !depthTest) return false;
+    rasterChunkHiZTests++;
+    if (!SoftFP_LocalBoundsOccluded(&gfx_mapCullData->aggregate)) return false;
+    rasterChunkHiZCull++;
+    return true;
+#else
+    return false;
+#endif
+}
+#endif
+
 #ifdef CC_BUILD_SOFTFP_PERSPECTIVE4
 static CC_INLINE int SoftFP_SelectPerspectiveShift(const VertexFixed* v0,
                                                    const VertexFixed* v1,
@@ -1714,6 +1975,7 @@ static CC_INLINE int SoftFP_SelectPerspectiveShift(const VertexFixed* v0,
     /* Keep the maximum reciprocal-W change across a correction interval
      * below a conservative fraction of the polygon's farthest reciprocal-W.
      * Returning a shift keeps all intervals power-of-two and screen aligned. */
+    if (minW > 0 && delta * 32u <= ((cc_uint64)(cc_uint32)minW >> 7)) return 5;
     if (minW > 0 && delta * 16u <= ((cc_uint64)(cc_uint32)minW >> 7)) return 4;
     if (minW > 0 && delta *  8u <= ((cc_uint64)(cc_uint32)minW >> 5)) return 3;
     return 2;
@@ -1774,6 +2036,7 @@ static CC_NOINLINE void DrawTriangleFastTerrain(VertexFixed* V0, VertexFixed* V1
     int r1 = PackedCol_R(V0->c);
     int g1 = PackedCol_G(V0->c);
     int b1 = PackedCol_B(V0->c);
+    const TerrainTintTable* tintTable;
     cc_bool perspective;
     int perspectiveInterval = 1 << perspectiveShift;
     cc_uint32 spanPixelsLocal = 0;
@@ -1793,6 +2056,7 @@ static CC_NOINLINE void DrawTriangleFastTerrain(VertexFixed* V0, VertexFixed* V1
                         (cc_uint64)(maxY - minY + 1);
 
     if (area == 0 || (w0 <= 0 && w1 <= 0 && w2 <= 0)) return;
+    tintTable = TerrainTintCache_Get(r1, g1, b1);
     /* Multiplying a 16.16 coordinate by an integer texture dimension is
      * exactly the same as FixedMul(coord, dimension << 16). Keep the product
      * unsigned so the low 32-bit wrap behaviour also remains defined. */
@@ -1951,7 +2215,9 @@ static CC_NOINLINE void DrawTriangleFastTerrain(VertexFixed* V0, VertexFixed* V1
                 if (!(fastTexel & SOFT_TEXEL_A_MASK)) goto next_split_terrain_pixel;
 
                 *fastDepth = fastZ;
-                fastColor = SoftPixel_FromTexelTint(fastTexel, r1, g1, b1);
+                SoftFP_RecordTerrainCoverage(x, y);
+                fastColor = tintTable ? SoftPixel_FromTintTable(fastTexel, tintTable) :
+                                        SoftPixel_FromTexelTint(fastTexel, r1, g1, b1);
 #ifdef CC_BUILD_SOFTFP_FOG4
                 fastColor = APPLY_FOG4(fastColor, w_interp, fogPixelsLocal);
 #endif
@@ -2001,6 +2267,7 @@ static CC_NOINLINE void DrawQuadFastTerrain(VertexFixed quad[4], int area,
     int r1 = PackedCol_R(quad[0].c);
     int g1 = PackedCol_G(quad[0].c);
     int b1 = PackedCol_B(quad[0].c);
+    const TerrainTintTable* tintTable;
     int x, y, i;
     SoftTexel* quadTexPixels = curTexPixels;
     int quadTexHeightMask = texHeightMask;
@@ -2032,6 +2299,7 @@ static CC_NOINLINE void DrawQuadFastTerrain(VertexFixed quad[4], int area,
     rasterBboxPixels += (cc_uint64)(maxX - minX + 1) *
                         (cc_uint64)(maxY - minY + 1);
     if (w0 <= 0 && w1 <= 0 && w2 <= 0 && w3 <= 0) return;
+    tintTable = TerrainTintCache_Get(r1, g1, b1);
 
     u0 = (int)((cc_uint32)quad[0].u * (cc_uint32)curTexWidth);
     v0 = (int)((cc_uint32)quad[0].v * (cc_uint32)curTexHeight);
@@ -2191,7 +2459,9 @@ static CC_NOINLINE void DrawQuadFastTerrain(VertexFixed quad[4], int area,
                     fastTexel = quadTexPixels[fastTexY * curTexWidth + fastTexX];
                     if (!(fastTexel & SOFT_TEXEL_A_MASK)) goto next_quad_terrain_pixel;
                     *fastDepth = fastZ;
-                    fastColor = SoftPixel_FromTexelTint(fastTexel, r1, g1, b1);
+                    SoftFP_RecordTerrainCoverage(x, y);
+                    fastColor = tintTable ? SoftPixel_FromTintTable(fastTexel, tintTable) :
+                                            SoftPixel_FromTexelTint(fastTexel, r1, g1, b1);
 #ifdef CC_BUILD_SOFTFP_FOG4
                     fastColor = APPLY_FOG4(fastColor, w_interp, fogPixelsLocal);
 #endif
@@ -2912,6 +3182,13 @@ static void ProcessClippedTriangleAndDraw(VertexFixed* inVerts, int polyCount,
         VertexFixed* B = &inVerts[1];
         VertexFixed* C = &inVerts[2];
         VertexFixed* D = &inVerts[3];
+
+        rasterHiZTests++;
+        if (SoftFP_TerrainQuadOccluded(inVerts)) {
+            rasterHiZCull++;
+            return;
+        }
+
         int area = SoftFP_RasterEdge(
             SOFTFP_RASTER_COORD(A->x), SOFTFP_RASTER_COORD(A->y),
             SOFTFP_RASTER_COORD(B->x), SOFTFP_RASTER_COORD(B->y),
@@ -3159,8 +3436,15 @@ void DrawQuadsFixed(int startVertex, int verticesCount, DrawHints hints) {
     cc_bool perfWas2D = gfx_rendering2D;
 #ifdef CC_BUILD_SOFTFP_QUAD_FRUSTUM_CULL
     cc_uint32 quadCullLocal = 0;
+    cc_uint32 spriteCullLocal = 0;
 #endif
     holo_perf_count_quads((uint32_t)(verticesCount / 4));
+#ifdef CC_BUILD_SOFTFP_QUAD_FRUSTUM_CULL
+    if (!gfx_rendering2D && (hints & SOFTFP_MAP_BATCH_HINT) &&
+        (hints & DRAW_HINT_SPRITE)) {
+        rasterSpriteQuads += (cc_uint32)(verticesCount / 4);
+    }
+#endif
 #endif
 
     if (gfx_rendering2D && (hints & (DRAW_HINT_SPRITE|DRAW_HINT_RECT))) {
@@ -3189,13 +3473,20 @@ void DrawQuadsFixed(int startVertex, int verticesCount, DrawHints hints) {
 		}
 #endif
 		if (tex_offseting) ShiftTextureCoords(verticesCount);
+		{
+			int step = 4;
+			if (hints & DRAW_HINT_REVERSE) {
+				j = startVertex + verticesCount - 4;
+				step = -4;
+			}
 
-        for (i = 0; i < verticesCount / 4; i++, j += 4) {
+        for (i = 0; i < verticesCount / 4; i++, j += step) {
 #ifdef CC_BUILD_SOFTFP_QUAD_FRUSTUM_CULL
             if ((hints & SOFTFP_MAP_BATCH_HINT) && mapClipPlanes &&
                 SoftFP_MapQuadOutsideFrustum(j, mapClipPlanes)) {
 #ifdef CC_BUILD_ESP32S3
                 quadCullLocal++;
+                if (hints & DRAW_HINT_SPRITE) spriteCullLocal++;
 #endif
                 continue;
             }
@@ -3207,12 +3498,14 @@ void DrawQuadsFixed(int startVertex, int verticesCount, DrawHints hints) {
             
             DrawClippedFixed(vertices, clipPlaneMask, optimizeMap);
         }
+		}
 
 		if (tex_offseting) UnshiftTextureCoords(verticesCount);
     }
 #ifdef CC_BUILD_ESP32S3
 #ifdef CC_BUILD_SOFTFP_QUAD_FRUSTUM_CULL
     rasterQuadCullTotal += quadCullLocal;
+    rasterSpriteCull += spriteCullLocal;
 #endif
     holo_perf_add(perfWas2D ? HOLO_PERF_DRAW2D : HOLO_PERF_DRAW3D,
                   Stopwatch_ElapsedMicroseconds(perfMark, Stopwatch_Measure()));
@@ -3234,7 +3527,7 @@ void Gfx_DrawVb_IndexedTris(int verticesCount) {
 }
 
 void Gfx_DrawIndexedTris_T2fC4b(int verticesCount, int startVertex, DrawHints hints) {
-    /* Private bit 0x08 identifies the map-renderer-only fast cull path. */
+    /* Private bit 0x10 identifies the map-renderer-only fast cull path. */
     DrawQuadsFixed(startVertex, verticesCount, (DrawHints)(hints | SOFTFP_MAP_BATCH_HINT));
 }
 
@@ -3278,6 +3571,12 @@ void Gfx_EndFrame(void) {
     holo_perf_add(HOLO_PERF_PERSPECTIVE_PIXELS, rasterPerspectivePixels);
     holo_perf_add(HOLO_PERF_PERSPECTIVE_RECIPROCALS, rasterPerspectiveReciprocals);
     holo_perf_add(HOLO_PERF_RASTER_QUADS, rasterTerrainQuads);
+    holo_perf_add(HOLO_PERF_SPRITE_QUADS, rasterSpriteQuads);
+    holo_perf_add(HOLO_PERF_SPRITE_CULL, rasterSpriteCull);
+    holo_perf_add(HOLO_PERF_HIZ_TESTS, rasterHiZTests);
+    holo_perf_add(HOLO_PERF_HIZ_CULL, rasterHiZCull);
+    holo_perf_add(HOLO_PERF_CHUNK_HIZ_TESTS, rasterChunkHiZTests);
+    holo_perf_add(HOLO_PERF_CHUNK_HIZ_CULL, rasterChunkHiZCull);
     holo_perf_add(HOLO_PERF_PROJECTED_VERTICES, rasterProjectedVertices);
     holo_perf_add(HOLO_PERF_PROJECTION_REUSE, rasterProjectionReuse);
 #ifdef CC_BUILD_SOFTFP_PIXEL_PROBES
@@ -3290,6 +3589,10 @@ void Gfx_EndFrame(void) {
 #if defined CC_BUILD_SOFTFP_TEXEL_2X2 || defined CC_BUILD_SOFTFP_TERRAIN_TILE_CACHE
     holo_perf_add(HOLO_PERF_TEXTURE_REUSE, textureSampleReuse);
     holo_perf_add(HOLO_PERF_TEXTURE_LOAD, textureSampleLoads);
+#endif
+#ifdef SOFTFP_FAST_TERRAIN_KERNEL
+    holo_perf_add(HOLO_PERF_TINT_REUSE, terrainTintCacheHits);
+    holo_perf_add(HOLO_PERF_TINT_LOAD, terrainTintCacheMisses);
 #endif
 #endif
 #if defined CC_BUILD_SOFTFP_ASYNC_CLEAR && defined CC_BUILD_SOFTFP_FB16 && !defined CC_BUILD_SOFTFP_Z16_TILES && !defined CC_BUILD_SOFTFP_Z32_FASTCLEAR
@@ -3344,14 +3647,14 @@ void Gfx_OnWindowResize(int width, int height) {
     for (i = 0; i < raster_width; i++) {
         int x0 = (i * width) / raster_width;
         int x1 = ((i + 1) * width) / raster_width;
-        raster_to_color_x[i] = (cc_uint16)x0;
-        raster_to_color_width[i] = (cc_uint16)(x1 - x0);
+        raster_to_color_xw[i] = (cc_uint16)x0 |
+            ((x1 - x0) == 2 ? RASTER_GROUP_DOUBLE_X : 0);
     }
     for (i = 0; i < raster_height; i++) {
         int y0 = (i * height) / raster_height;
         int y1 = ((i + 1) * height) / raster_height;
-        raster_to_color_row[i] = (cc_uint32)(y0 * cb_stride);
-        raster_to_color_height[i] = (cc_uint16)(y1 - y0);
+        raster_to_color_rowh[i] = (cc_uint32)(y0 * cb_stride) |
+            ((y1 - y0) == 2 ? RASTER_GROUP_DOUBLE_Y : 0);
     }
 #else
     db_stride = width;
@@ -3401,21 +3704,21 @@ void Gfx_OnWindowResize(int width, int height) {
         Platform_LogConst("[cc.gfx] depth=Z16 linear PSRAM fallback");
     }
 #ifdef CC_BUILD_SOFTFP_PERSPECTIVE4
-    Platform_LogConst("[cc.gfx] texture=perspective-correct adaptive/4/8/16 A1RGB555 framebuffer=RGB565 alpha=fixed50 extras=off");
+    Platform_LogConst("[cc.gfx] texture=perspective-correct adaptive/4/8/16/32 A1RGB555 framebuffer=RGB565 alpha=fixed50 extras=off");
 #else
     Platform_LogConst("[cc.gfx] texture=affine A1RGB555 framebuffer=RGB565 alpha=fixed50 extras=off");
 #endif
 #elif defined CC_BUILD_SOFTFP_W_DEPTH8
     Platform_LogConst("[cc.gfx] depth=reciprocal-W Z8 hybrid-linear-log internal=27648 fixed");
 #ifdef CC_BUILD_SOFTFP_PERSPECTIVE4
-    Platform_LogConst("[cc.gfx] texture=perspective-correct adaptive/4/8/16 A1RGB555 framebuffer=RGB565 alpha=fixed50 extras=off");
+    Platform_LogConst("[cc.gfx] texture=perspective-correct adaptive/4/8/16/32 A1RGB555 framebuffer=RGB565 alpha=fixed50 extras=off");
 #else
     Platform_LogConst("[cc.gfx] texture=affine A1RGB555 framebuffer=RGB565 alpha=fixed50 extras=off");
 #endif
 #elif defined CC_BUILD_SOFTFP_Z32_FASTCLEAR
     Platform_LogConst("[cc.gfx] depth=Z32 original-order fast-clear");
 #ifdef CC_BUILD_SOFTFP_PERSPECTIVE4
-    Platform_LogConst("[cc.gfx] texture=perspective-correct adaptive/4/8/16 A1RGB555 framebuffer=RGB565 alpha=fixed50 extras=off");
+    Platform_LogConst("[cc.gfx] texture=perspective-correct adaptive/4/8/16/32 A1RGB555 framebuffer=RGB565 alpha=fixed50 extras=off");
 #else
     Platform_LogConst("[cc.gfx] texture=affine A1RGB555 framebuffer=RGB565 alpha=fixed50 extras=off");
 #endif
@@ -3434,7 +3737,7 @@ void Gfx_OnWindowResize(int width, int height) {
 #endif
     }
 #ifdef CC_BUILD_SOFTFP_PERSPECTIVE4
-    Platform_LogConst("[cc.gfx] texture=perspective-correct adaptive/4/8/16 A1RGB555 framebuffer=RGB565 alpha=fixed50 extras=off");
+    Platform_LogConst("[cc.gfx] texture=perspective-correct adaptive/4/8/16/32 A1RGB555 framebuffer=RGB565 alpha=fixed50 extras=off");
 #else
     Platform_LogConst("[cc.gfx] texture=affine A1RGB555 framebuffer=RGB565 alpha=fixed50 extras=off");
 #endif
