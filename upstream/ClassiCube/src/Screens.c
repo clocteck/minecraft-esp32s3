@@ -108,6 +108,13 @@ static void HUDScreen_RemakeLine1(struct HUDScreen* s) {
 		String_Format1(&status, "%i fps, ", &fps);
 	}
 
+#ifdef CC_BUILD_ESP32S3
+	/* Detailed pose/workload probes are already emitted over serial. Keep the
+	 * on-screen overlay small and stable so it remains readable at 320x240. */
+	if (status.length >= 2 && status.buffer[status.length - 2] == ',') {
+		status.length -= 2;
+	}
+#else
 	if (Game_ClassicMode) {
 		String_Format1(&status, "%i chunk updates", &Game.ChunkUpdates);
 	} else {
@@ -121,6 +128,7 @@ static void HUDScreen_RemakeLine1(struct HUDScreen* s) {
 		ping = Ping_AveragePingMS();
 		if (ping) String_Format1(&status, ", ping %i ms", &ping);
 	}
+#endif
 	TextWidget_Set(&s->line1, &status, &s->font);
 	s->dirty = true;
 }
@@ -340,6 +348,9 @@ static void HUDScreen_Update(void* screen, float delta) {
 
 	HUDScreen_UpdateFPS(s,          delta);
 	HotbarWidget_Update(&s->hotbar, delta);
+#ifdef CC_BUILD_ESP32S3
+	return;
+#endif
 	if (Game_ClassicMode) return;
 
 	if (IsOnlyChatActive() && Gui.ShowFPS) {
@@ -380,7 +391,11 @@ static void HUDScreen_BuildMesh(void* screen) {
 	Widget_BuildMesh(&s->line2,  ptr);
 	Widget_BuildMesh(&s->hotbar, ptr);
 
-	if (!Game_ClassicMode) 
+	if (!Game_ClassicMode
+#ifdef CC_BUILD_ESP32S3
+		&& false
+#endif
+	)
 		HUDScreen_BuildPosition(s, data);
 	Gfx_UnlockDynamicVb(s->vb);
 }
@@ -395,6 +410,7 @@ static void HUDScreen_Render(void* screen, float delta) {
 	Gfx_BindDynamicVb(s->vb);
 	if (Gui.ShowFPS) Widget_Render2(&s->line1, 4);
 
+#ifndef CC_BUILD_ESP32S3
 	if (Game_ClassicMode) {
 		Widget_Render2(&s->line2, 8);
 	} else if (IsOnlyChatActive() && Gui.ShowFPS) {
@@ -403,6 +419,7 @@ static void HUDScreen_Render(void* screen, float delta) {
 		Gfx_DrawVb_IndexedTris_Range(s->posCount, 12 + HOTBAR_MAX_VERTICES, DRAW_HINT_RECT);
 		/* TODO swap these two lines back */
 	}
+#endif
 
 	if (!Gui_GetBlocksWorld()) {
 		Gfx_BindDynamicVb(s->vb);

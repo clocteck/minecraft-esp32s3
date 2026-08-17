@@ -485,15 +485,22 @@ GfxResourceID Gfx_CreateVb(VertexFormat fmt, int count) {
 }
 
 GfxResourceID Gfx_TryCreateStaticVb(VertexFormat fmt, int count) {
-	GfxResourceID vb;
 	if (Gfx.LostContext) return 0;
 
+#ifdef CC_BUILD_ESP32S3
+	/* View distance is a fixed profiling/gameplay contract on this target.
+	 * A transient large chunk allocation must not silently halve it. The map
+	 * renderer records the failed chunk and retries after movement/refresh. */
+	return Gfx_AllocStaticVb(fmt, count);
+#else
+	GfxResourceID vb;
 	for (;;)
 	{
 		if ((vb = Gfx_AllocStaticVb(fmt, count))) return vb;
 
 		if (!Game_ReduceVRAM()) return 0;
 	}
+#endif
 }
 
 GfxResourceID Gfx_CreateDynamicVb(VertexFormat fmt, int maxVertices) {

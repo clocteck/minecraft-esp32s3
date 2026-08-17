@@ -186,6 +186,11 @@ static void report_window(uint64_t now_us)
     log_append_avg_count(&line, " hizCull=", s_total.slots[HOLO_PERF_HIZ_CULL]);
     log_append_avg_count(&line, " chzQ=", s_total.slots[HOLO_PERF_CHUNK_HIZ_TESTS]);
     log_append_avg_count(&line, " chzCull=", s_total.slots[HOLO_PERF_CHUNK_HIZ_CULL]);
+    log_append_avg_count(&line, " ghzQ=", s_total.slots[HOLO_PERF_GROUP_HIZ_TESTS]);
+    log_append_avg_count(&line, " ghzCull=", s_total.slots[HOLO_PERF_GROUP_HIZ_CULL]);
+    log_append_avg_count(&line, " thzHit=", s_total.slots[HOLO_PERF_TEMPORAL_HIZ_HIT]);
+    log_append_avg_count(&line, " thzMiss=", s_total.slots[HOLO_PERF_TEMPORAL_HIZ_MISS]);
+    log_append_avg_count(&line, " thzCull=", s_total.slots[HOLO_PERF_TEMPORAL_HIZ_CULL]);
     log_append_avg_count(&line, " projV=", s_total.slots[HOLO_PERF_PROJECTED_VERTICES]);
     log_append_avg_count(&line, " projReuse=", s_total.slots[HOLO_PERF_PROJECTION_REUSE]);
     log_append_avg_count(&line, " cutPx=", s_total.slots[HOLO_PERF_FAST_CUTOUT_PIXELS]);

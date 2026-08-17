@@ -676,9 +676,15 @@ void Physics_Init(void) {
 	Physics.OnActivate[BLOCK_STILL_LAVA]  = Physics_EnqueueLava;
 
 	Physics.OnRandomTick[BLOCK_WATER]       = Physics_ActivateWater;
+#ifndef CC_BUILD_ESP32S3
 	Physics.OnRandomTick[BLOCK_STILL_WATER] = Physics_ActivateWater;
+#endif
 	Physics.OnRandomTick[BLOCK_LAVA]        = Physics_ActivateLava;
+#ifndef CC_BUILD_ESP32S3
 	Physics.OnRandomTick[BLOCK_STILL_LAVA]  = Physics_ActivateLava;
+#else
+	Platform_LogConst("[cc.physics] generated still liquids=static; placed liquids=active");
+#endif
 
 	Physics.OnPlace[BLOCK_SLAB]        = Physics_HandleSlab;
 	if (Game_ClassicMode) return;

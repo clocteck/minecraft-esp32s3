@@ -131,7 +131,11 @@ static void SPConnection_BeginConnect(void) {
 		Map_LoadFrom(&SP_AutoloadMap); return;
 	}
 
-#if defined CC_BUILD_NDS || defined CC_BUILD_PS1 || defined CC_BUILD_SATURN || defined CC_BUILD_MACCLASSIC || defined CC_BUILD_TINYMEM
+	#if defined CC_BUILD_ESP32S3
+	/* Keep a larger playable map while limiting vertical generation and mesh cost. */
+	horSize = 128;
+	verSize = 40;
+	#elif defined CC_BUILD_NDS || defined CC_BUILD_PS1 || defined CC_BUILD_SATURN || defined CC_BUILD_MACCLASSIC || defined CC_BUILD_TINYMEM
 	horSize = 16;
 	verSize = 16;
 #elif defined CC_BUILD_LOWMEM

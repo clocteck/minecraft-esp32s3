@@ -441,6 +441,7 @@ void* Gfx_CreateMapCullBounds(GfxResourceID vb, int verticesCount,
 void Gfx_DeleteMapCullBounds(void** bounds);
 void Gfx_BindMapCullBounds(void* bounds, int originX, int originY, int originZ);
 cc_bool Gfx_IsBoundMapOccluded(void);
+cc_bool Gfx_IsBoundMapRangeOccluded(int firstVertex, int verticesCount);
 #endif
 #ifdef CC_CLIPPING_FLAGS
 cc_bool Gfx_CanSphereSkipClipping(float x, float y, float z, float radius);

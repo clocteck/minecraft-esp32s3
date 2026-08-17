@@ -42,6 +42,7 @@ struct ChunkInfo {
 	cc_uint8 allAir  : 1; /* Whether chunk is completely air */
 	cc_uint8 noData  : 1; /* Whether chunk is currently empty of data, but may have data if built */
 	cc_uint8 skipClip: 1; /* Whether chunk can skip GPU backend clipping (see CC_CLIPPING_FLAGS) */
+	cc_uint8 buildFailed : 1; /* Retry an OOM mesh only after movement or an explicit refresh */
 	cc_uint8 : 0;         /* pad to next byte*/
 
 	cc_uint8 drawXMin : 1;

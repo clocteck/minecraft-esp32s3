@@ -49,6 +49,10 @@ static cc_uint32* distances;
 static int maxChunkUpdates;
 /* Cached number of chunks in the world */
 static int chunksCount;
+/* Set by block/environment refreshes. Once all in-range dirty chunks have
+ * rebuilt, a stationary camera can reuse renderChunks without scanning the
+ * entire world every frame. */
+static cc_bool chunksNeedScan;
 
 static void ChunkInfo_Init(struct ChunkInfo* chunk, int x, int y, int z) {
 	chunk->centreX = x + HALF_CHUNK_SIZE; chunk->centreY = y + HALF_CHUNK_SIZE; 
@@ -63,6 +67,7 @@ static void ChunkInfo_Init(struct ChunkInfo* chunk, int x, int y, int z) {
 	chunk->noData   = true;
 	chunk->dirty    = true;
 	chunk->skipClip = false;
+	chunk->buildFailed = false;
 #if defined CC_BUILD_ESP32S3 && defined CC_BUILD_SOFTFP_QUAD_FRUSTUM_CULL
 	chunk->softClipPlanes = 0x3F;
 	chunk->softCullBounds = NULL;
@@ -80,6 +85,8 @@ static CC_INLINE void ChunkInfo_Refresh(struct ChunkInfo* chunk) {
 
 	chunk->empty = false;
 	chunk->dirty = true;
+	chunk->buildFailed = false;
+	chunksNeedScan = true;
 }
 
 /* Index of maximum used 1D atlas + 1 */
@@ -137,19 +144,23 @@ static void CheckWeather(float delta) {
 #endif
 
 #if defined CC_BUILD_ESP32S3 && CC_GFX_BACKEND != CC_GFX_BACKEND_GL11
+#define DrawNormalFaceVisible(face, faceOffset, faceHint) do { \
+	int faceCount = part.counts[face]; \
+	if (!Gfx_IsBoundMapRangeOccluded((faceOffset), faceCount)) { \
+		DrawFaceHint((face), (faceOffset), (faceHint)); \
+		Game_Vertices += faceCount; \
+	} \
+} while (0)
 #define DrawNormalFaces(minFace, maxFace) \
 if (drawMin && drawMax) { \
 	Gfx_SetFaceCulling(true); \
-	DrawFaceHint(minFace, offset, lodHint); \
-	DrawFaceHint(maxFace, offset + part.counts[minFace], (DrawHints)(lodHint | DRAW_HINT_REVERSE)); \
+	DrawNormalFaceVisible(minFace, offset, lodHint); \
+	DrawNormalFaceVisible(maxFace, offset + part.counts[minFace], (DrawHints)(lodHint | DRAW_HINT_REVERSE)); \
 	Gfx_SetFaceCulling(false); \
-	Game_Vertices += (part.counts[minFace] + part.counts[maxFace]); \
 } else if (drawMin) { \
-	DrawFaceHint(minFace, offset, lodHint); \
-	Game_Vertices += part.counts[minFace]; \
+	DrawNormalFaceVisible(minFace, offset, lodHint); \
 } else if (drawMax) { \
-	DrawFaceHint(maxFace, offset + part.counts[minFace], (DrawHints)(lodHint | DRAW_HINT_REVERSE)); \
-	Game_Vertices += part.counts[maxFace]; \
+	DrawNormalFaceVisible(maxFace, offset + part.counts[minFace], (DrawHints)(lodHint | DRAW_HINT_REVERSE)); \
 }
 #else
 #define DrawNormalFaces(minFace, maxFace) \
@@ -169,10 +180,10 @@ if (drawMin && drawMax) { \
 
 #ifdef CC_BUILD_ESP32S3
 static cc_bool ChunkUsesFarLod(const struct ChunkInfo* info) {
-	float dx = Camera.CurrentPos.x - info->centreX;
-	float dz = Camera.CurrentPos.z - info->centreZ;
-	float limit = (float)Game_ViewDistance;
-	return dx * dx + dz * dz > limit * limit;
+	(void)info;
+	/* PS1-style profile: terrain is affine at every distance. Dynamic models
+	 * and UI retain their normal interpolation paths. */
+	return true;
 }
 #endif
 
@@ -507,6 +518,7 @@ static void DeleteChunk(struct ChunkInfo* chunk) {
 	chunk->allAir = false;
 	chunk->noData = true;
 	chunk->dirty  = true;
+	chunk->buildFailed = false;
 
 #ifdef OCCLUSION
 	chunk.OcclusionFlags = 0;
@@ -554,12 +566,16 @@ static void BuildChunk(struct ChunkInfo* chunk, int* chunkUpdates) {
 	buildResult = Builder_MakeChunk(chunk);
 	holo_perf_add(HOLO_PERF_CHUNK_BUILD, Stopwatch_ElapsedMicroseconds(perfMark, Stopwatch_Measure()));
 	holo_perf_count_chunk_build();
-	if (!buildResult) return;
+	if (!buildResult) {
+		chunk->buildFailed = true;
+		return;
+	}
 #else
 	if (!Builder_MakeChunk(chunk)) return;
 #endif
 
 	chunk->dirty  = false;
+	chunk->buildFailed = false;
 	chunk->noData = !chunk->normalParts && !chunk->translucentParts;
 	chunk->empty  = chunk->noData;
 	if (chunk->empty) return;
@@ -599,6 +615,7 @@ static void FreeChunks(void) {
 	sortedChunks = NULL;
 	renderChunks = NULL;
 	distances    = NULL;
+	chunksNeedScan = false;
 }
 
 static void AllocateParts(void) {
@@ -637,6 +654,7 @@ static void ResetPartCounts(void) {
 
 static void InitChunks(void) {
 	int x, y, z, index = 0;
+	chunksNeedScan = true;
 	for (z = 0; z < World.Length; z += CHUNK_SIZE) {
 		for (y = 0; y < World.Height; y += CHUNK_SIZE) {
 			for (x = 0; x < World.Width; x += CHUNK_SIZE) {
@@ -669,6 +687,7 @@ static void DeleteChunks(void) {
 		DeleteChunk(&mapChunks[i]);
 	}
 	ResetPartCounts();
+	chunksNeedScan = true;
 }
 
 void MapRenderer_Refresh(void) {
@@ -736,7 +755,7 @@ static void CalcViewDists(void) {
 	renderDistSquared = AdjustDist(Game_ViewDistance);
 }
 
-static int UpdateChunksAndVisibility(int* chunkUpdates) {
+static int UpdateChunksAndVisibility(int* chunkUpdates, cc_bool* pendingBuilds) {
 	int renderDistSqr = renderDistSquared;
 	int buildDistSqr  = buildDistSquared;
 
@@ -754,9 +773,12 @@ static int UpdateChunksAndVisibility(int* chunkUpdates) {
 			DeleteChunk(chunk); continue;
 		}
 
-		if (chunk->dirty && distSqr <= buildDistSqr && *chunkUpdates < chunksTarget) {
-			DeleteChunk(chunk);
-			BuildChunk(chunk, chunkUpdates);
+		if (chunk->dirty && distSqr <= buildDistSqr) {
+			if (*chunkUpdates < chunksTarget) {
+				DeleteChunk(chunk);
+				BuildChunk(chunk, chunkUpdates);
+			}
+			if (chunk->dirty && !chunk->buildFailed) *pendingBuilds = true;
 		}
 
 		if (distSqr > renderDistSqr) {
@@ -776,7 +798,7 @@ static int UpdateChunksAndVisibility(int* chunkUpdates) {
 	return j;
 }
 
-static int UpdateChunksStill(int* chunkUpdates) {
+static int UpdateChunksStill(int* chunkUpdates, cc_bool* pendingBuilds) {
 	int renderDistSqr = renderDistSquared;
 	int buildDistSqr  = buildDistSquared;
 
@@ -794,9 +816,12 @@ static int UpdateChunksStill(int* chunkUpdates) {
 			DeleteChunk(chunk); continue;
 		}
 
-		if (chunk->dirty && distSqr <= buildDistSqr && *chunkUpdates < chunksTarget) {
-			DeleteChunk(chunk);
-			BuildChunk(chunk, chunkUpdates);
+		if (chunk->dirty && distSqr <= buildDistSqr && !chunk->buildFailed) {
+			if (*chunkUpdates < chunksTarget) {
+				DeleteChunk(chunk);
+				BuildChunk(chunk, chunkUpdates);
+			}
+			if (chunk->dirty && !chunk->buildFailed) *pendingBuilds = true;
 
 			/* only need to update the visibility of chunks in range. */
 			if (distSqr > renderDistSqr) {
@@ -822,6 +847,7 @@ static int UpdateChunksStill(int* chunkUpdates) {
 static void UpdateChunks(float delta) {
 	struct LocalPlayer* p;
 	cc_bool samePos;
+	cc_bool pendingBuilds = false;
 	int chunkUpdates = 0;
 
 	/* Build more chunks if 30 FPS or over, otherwise slowdown */
@@ -830,10 +856,12 @@ static void UpdateChunks(float delta) {
 	p = Entities.CurPlayer;
 	samePos = Vec3_Equals(&Camera.CurrentPos, &lastCamPos)
 		&& p->Base.Pitch == lastPitch && p->Base.Yaw == lastYaw;
+	if (samePos && !chunksNeedScan) return;
 
 	renderChunksCount = samePos ?
-		UpdateChunksStill(&chunkUpdates) :
-		UpdateChunksAndVisibility(&chunkUpdates);
+		UpdateChunksStill(&chunkUpdates, &pendingBuilds) :
+		UpdateChunksAndVisibility(&chunkUpdates, &pendingBuilds);
+	chunksNeedScan = pendingBuilds;
 
 	lastCamPos = Camera.CurrentPos;
 	lastPitch  = p->Base.Pitch;

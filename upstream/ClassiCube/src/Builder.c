@@ -425,7 +425,12 @@ cc_bool Builder_MakeChunk(struct ChunkInfo* info) {
 #if CC_GFX_BACKEND != CC_GFX_BACKEND_GL11
 	/* add an extra element to fix crashing on some GPUs */
 	info->vb = Gfx_TryCreateStaticVb(VERTEX_FORMAT_TEXTURED, totalVerts + 1);
-	if (!info->vb) return false;
+	if (!info->vb) {
+#ifdef CC_BUILD_ESP32S3
+		Platform_Log1("[cc.mem] chunk VB allocation failed, vertices=%i", &totalVerts);
+#endif
+		return false;
+	}
 
 	Builder_Vertices = (struct VertexTextured*)Gfx_LockVb(info->vb,
 													VERTEX_FORMAT_TEXTURED, totalVerts + 1);

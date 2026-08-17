@@ -6,7 +6,7 @@ of producing a standalone flash image.
 
 ## First-version scope
 
-- offline single-player only, with a 64x64x64 generated world
+- offline single-player only, with a 128x40x128 generated world
 - fixed 192x144 3D rendering enlarged beneath native 320x240 UI
 - ClassiCube SoftFP fixed-point software renderer
 - RGB565 DMA output to the host display
@@ -28,16 +28,20 @@ every covered depth cell proves it hidden. Chunk-local bounds use conservative
 1/8-block quantisation. The fixed 192-to-320 output map is packed for two-load
 RGB565 stores, and an eight-entry tint LUT replaces per-pixel colour multiplies
 without changing the resulting RGB565 value. Near-plane raster edge coordinates
-use a range that remains safe when the camera is very close to geometry.
+use a range that remains safe when the camera is very close to geometry. A
+four-way temporal Hi-Z cache reuses only exact-view conservative screen bounds;
+geometry changes invalidate it. Terrain and models use PS1-style affine texture
+mapping with full-rate texel sampling.
 
 For repeatable profiling, serial output includes camera position, yaw, pitch,
 HUD vertex count, submitted quads, raster primitives, bounding-box/span pixels,
 Hi-Z decisions, projected vertices, and perspective reciprocal counts. A
-10-second fixed-seed checkpoint at `(32.50, 34.62, 32.50)`, yaw/pitch zero,
-view distance 20 now sustains about 16.63-16.85 FPS / 59.2-60.0 ms frame /
-44.5-45.0 ms `draw3d` on the tested device. The older 150x40x150 island
-world is intentionally not the default because its much larger visible workload
-reduced the same 192x144 renderer to roughly 9 FPS at its fixed spawn.
+10-second fixed-seed checkpoint at `(64.50, 30.62, 64.50)`, yaw/pitch zero,
+view distance 20 now sustains about 17.68-18.03 FPS / 55.3-56.4 ms frame on
+the tested device, up from about 14.4-14.8 FPS for the initial 128x40x128
+baseline. The native HUD keeps a concise FPS readout; detailed pose and pipeline
+statistics remain on serial. Generated still liquids remain static to avoid
+continuous background remeshing, while player-placed liquids still flow.
 
 Sound effects use one host-owned mono I2S stream. Up to eight virtual voices
 are mixed by a PSRAM-stack worker pinned to Core 0; sound samples remain in
