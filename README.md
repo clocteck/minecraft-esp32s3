@@ -22,7 +22,8 @@ resolution. 3D samples use fixed 5:3 expansion into the native 320x240 framebuff
 UI remains native. This build still requires PSRAM for the game heap.
 
 The ESP32-S3 terrain path keeps mesh faces as quads through clipping and
-rasterisation. Near-to-far face ordering feeds conservative 4x4/8x8 hierarchical
+culling, then rasterises textured faces as two affine triangles so all four UV
+corners are honoured. Near-to-far face ordering feeds conservative 4x4/8x8 hierarchical
 Z rejection for individual quads and whole chunks; a bound is skipped only when
 every covered depth cell proves it hidden. Chunk-local bounds use conservative
 1/8-block quantisation. The fixed 192-to-320 output map is packed for two-load
@@ -32,12 +33,15 @@ use a range that remains safe when the camera is very close to geometry. A
 double-buffered temporal Hi-Z cache reuses only exact-view conservative screen
 bounds; geometry changes invalidate it. Terrain uses PS1-style affine texture
 mapping with full-rate sampling, while held/dynamic models retain their exact
-generic path. The ESP32-S3 hot path shares one compact affine triangle/quad
-kernel, advances interpolation planes by scanline, batches Hi-Z coverage bits,
+generic path. The ESP32-S3 hot path shares one compact affine triangle kernel
+(retaining the quad kernel only for untextured depth passes), advances
+interpolation planes by scanline, batches Hi-Z coverage bits,
 caches 16 final shaded terrain tiles internally, and submits batches of 32
 complete raster jobs to Core 0.
 Distance fog is disabled: the ordered low-cost variant was visibly granular at
 192x144, while smooth per-pixel fog consumed too much of the full-frame budget.
+The packaged texture set is the complete ClassiCube resource archive with a
+256x256 terrain atlas; the earlier N64-only 256x128 atlas omitted upper rows.
 Two 48-row and two 12-row RGB565 colour bands keep 120 of 144 raster rows
 (46,080 bytes) in internal RAM; the dynamic-VB arena is 12 KiB, with its colder
 tail falling back to PSRAM so the mandatory DMA buffers retain priority.

@@ -196,7 +196,6 @@ static void report_window(uint64_t now_us)
     log_append_avg_count(&line, " uiGen=", s_total.slots[HOLO_PERF_UI_GENERIC_SPRITES]);
     log_append_avg_count(&line, " uiPx=", s_total.slots[HOLO_PERF_UI_SPRITE_PIXELS]);
     log_append_avg_count(&line, " cellSkip=", s_total.slots[HOLO_PERF_HIZ_CELL_SKIP_PIXELS]);
-    log_append_avg_count(&line, " blk4Px=", s_total.slots[HOLO_PERF_OPAQUE_BLOCK4_PIXELS]);
     log_append_avg_count(&line, " frCull=", s_total.slots[HOLO_PERF_FRUSTUM_CULL]);
     log_append_avg_count(&line, " bfCull=", s_total.slots[HOLO_PERF_BACKFACE_CULL]);
     log_append_avg_count(&line, " tmpCull=", s_total.slots[HOLO_PERF_TEMPORAL_CULL]);

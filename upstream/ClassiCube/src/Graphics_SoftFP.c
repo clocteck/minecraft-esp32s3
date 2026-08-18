@@ -221,7 +221,6 @@ static cc_uint32 rasterPerspectiveReciprocals;
 static cc_uint32 rasterTriangleCount;
 static cc_uint32 rasterTerrainQuads;
 static cc_uint32 rasterOpaqueLutQuads;
-static cc_uint32 rasterOpaqueBlock4Pixels;
 static cc_uint32 rasterHiZCellSkipPixels;
 static cc_uint32 rasterSpriteQuads, rasterSpriteCull;
 static cc_uint32 rasterUiFastSprites, rasterUiGenericSprites, rasterUiSpritePixels;
@@ -1170,7 +1169,6 @@ static void ResetRasterFrameCounters(void) {
     rasterTriangleCount = 0;
     rasterTerrainQuads = 0;
     rasterOpaqueLutQuads = 0;
-    rasterOpaqueBlock4Pixels = 0;
     rasterHiZCellSkipPixels = 0;
     rasterSpriteQuads = rasterSpriteCull = 0;
     rasterUiFastSprites = rasterUiGenericSprites = rasterUiSpritePixels = 0;
@@ -3165,7 +3163,6 @@ static CC_NOINLINE void RasterizeTerrainOpaqueLutDirect(TerrainRasterScratch* sc
     int rowW = scratch->rowW, rowU = scratch->rowU, rowV = scratch->rowV;
     cc_uint32 spanPixelsLocal = 0;
     cc_uint32 cellSkipPixelsLocal = 0;
-    cc_uint32 block4PixelsLocal = 0;
     int i, x, y;
 
     for (y = scratch->minY; y <= scratch->maxY; y++) {
@@ -3231,72 +3228,6 @@ static CC_NOINLINE void RasterizeTerrainOpaqueLutDirect(TerrainRasterScratch* sc
                             }
                         }
                     }
-#if defined CC_BUILD_SOFTFP_OPAQUE_BLOCK4 && defined SOFTFP_LOWRES_COLOR_STAGE
-                    /* Every complete aligned cell uses one unrolled path. Z8
-                     * comparisons and writes remain exact per pixel, including
-                     * partial accepts. At 192x144 the intentionally coarse
-                     * texture sample is shared by four horizontal pixels. */
-                    if (cellEnd - x == 3 && wInterp > 0) {
-                        int w1 = wInterp + scratch->stepW;
-                        int w2 = w1 + scratch->stepW;
-                        int w3 = w2 + scratch->stepW;
-                        if (w1 > 0 && w2 > 0 && w3 > 0) {
-                            DepthValue z0 = depthLut[(cc_uint32)wInterp >> 8];
-                            DepthValue z3 = depthLut[(cc_uint32)w3 >> 8];
-                            DepthValue z1, z2;
-                            cc_uint8 passMask = 0;
-                            if (z0 == z3) {
-                                /* Monotonic encoder: equal endpoints prove the
-                                 * two interior samples have the same exact Z8. */
-                                z1 = z2 = z0;
-                            } else {
-                                z1 = depthLut[(cc_uint32)w1 >> 8];
-                                z2 = depthLut[(cc_uint32)w2 >> 8];
-                            }
-                            {
-                                typedef cc_uint32 __attribute__((may_alias)) AliasU32;
-                                int tex0 = (((vInterp >> FP_SHIFT) & 15) << 4) |
-                                           ((uInterp >> FP_SHIFT) & 15);
-                                cc_uint32 packedZ = (cc_uint32)z0 |
-                                    ((cc_uint32)z1 << 8) |
-                                    ((cc_uint32)z2 << 16) |
-                                    ((cc_uint32)z3 << 24);
-                                cc_uint32 oldDepth = *(const AliasU32*)depth;
-                                SoftPixel sample = shaded[tex0];
-                                if (z0 < (DepthValue)(oldDepth      )) passMask |= 1u;
-                                if (z1 < (DepthValue)(oldDepth >>  8)) passMask |= 2u;
-                                if (z2 < (DepthValue)(oldDepth >> 16)) passMask |= 4u;
-                                if (z3 < (DepthValue)(oldDepth >> 24)) passMask |= 8u;
-                                if (passMask == 15u) {
-                                    cc_uint32 colors = (cc_uint32)sample |
-                                        ((cc_uint32)sample << 16);
-                                    *(AliasU32*)depth = packedZ;
-                                    ((AliasU32*)colorDst)[0] = colors;
-                                    ((AliasU32*)colorDst)[1] = colors;
-                                } else if (passMask) {
-                                    if (passMask & 1u) { depth[0] = z0; colorDst[0] = sample; }
-                                    if (passMask & 2u) { depth[1] = z1; colorDst[1] = sample; }
-                                    if (passMask & 4u) { depth[2] = z2; colorDst[2] = sample; }
-                                    if (passMask & 8u) { depth[3] = z3; colorDst[3] = sample; }
-                                }
-                            }
-                            if (passMask) {
-                                if (coverageMask != 0xFFFFu) {
-                                    coverageMask = (cc_uint16)(coverageMask |
-                                        (cc_uint16)(coverageBitBase * passMask));
-                                }
-                            }
-                            x += 4; depth += 4; colorDst += 4;
-                            wInterp += scratch->stepW * 4;
-                            uInterp = (int)((cc_uint32)uInterp +
-                                (cc_uint32)scratch->stepU * 4u);
-                            vInterp = (int)((cc_uint32)vInterp +
-                                (cc_uint32)scratch->stepV * 4u);
-                            block4PixelsLocal += 4;
-                            goto finish_opaque_lut_cell;
-                        }
-                    }
-#endif
                     for (; x <= cellEnd; x++, depth++) {
                         DepthValue z;
                         int texIndex;
@@ -3324,7 +3255,6 @@ next_opaque_lut_near_pixel:
                         colorDst++;
 #endif
                     }
-finish_opaque_lut_cell:
                     if (coverageMask != coverageOld) {
                         coverageRow[coverageX] = coverageMask;
                         if (coverageMask == 0xFFFFu) {
@@ -3388,7 +3318,6 @@ next_opaque_lut_pixel:
     }
     __atomic_fetch_add(&rasterSpanPixels, spanPixelsLocal, __ATOMIC_RELAXED);
     __atomic_fetch_add(&rasterHiZCellSkipPixels, cellSkipPixelsLocal, __ATOMIC_RELAXED);
-    __atomic_fetch_add(&rasterOpaqueBlock4Pixels, block4PixelsLocal, __ATOMIC_RELAXED);
     rasterMapRasterCycles += SoftFP_ReadCycles() - kernelStart;
 }
 
@@ -5258,10 +5187,10 @@ static void ProcessClippedTriangleAndDraw(VertexFixed* inVerts, int polyCount,
 #endif
     if (polyCount < 3) return;
 
-    /* Project each unique polygon vertex once. Fast map quads stay quads;
-     * other polygons are emitted as a triangle fan.
+    /* Project each unique polygon vertex once. Depth-only map quads can stay
+     * quads; textured polygons are emitted as a triangle fan.
      * The old path repeated the reciprocal-W viewport transform six times
-    * per quad, and repeated another six reciprocals when culling was active. */
+     * per quad, and repeated another six reciprocals when culling was active. */
     for (i = 0; i < polyCount; i++) {
 #if defined CC_BUILD_ESP32S3 && defined CC_BUILD_SOFTFP_LOWRES_RASTER && defined SOFTFP_FAST_TERRAIN_KERNEL
         if (fastMapMode == SOFTFP_MAP_MODE_OPAQUE) {
@@ -5305,27 +5234,41 @@ static void ProcessClippedTriangleAndDraw(VertexFixed* inVerts, int polyCount,
             SOFTFP_RASTER_COORD(C->x), SOFTFP_RASTER_COORD(C->y),
             SOFTFP_RASTER_COORD(D->x), SOFTFP_RASTER_COORD(D->y));
 
-        /* Only take the direct path for a consistently wound convex quad.
-         * Degenerate and unusual model-like inputs retain the proven fan. */
+        /* Coverage and reciprocal depth form one plane across a block face, so
+         * an untextured depth-only quad can use the direct polygon path. Raw
+         * affine U/V do not: after perspective projection the fourth corner
+         * of a trapezoid generally differs from the plane fitted through the
+         * first three corners. Textured quads must therefore use the two
+         * triangles below so V3's U/V participates in the second half. */
         if (ABS(area) > SOFTFP_RASTER_FP_ONE &&
             ABS(area2) > SOFTFP_RASTER_FP_ONE &&
             ((area ^ area2) >= 0)) {
-            int factor;
             if (faceCulling && area > 0) return;
-            factor = FixedReciprocalFast(area);
+#ifdef CC_BUILD_ESP32S3
+            rasterTerrainQuads++;
+            if (fastMapMode == SOFTFP_MAP_MODE_DEPTH_ONLY) {
+                int factor = FixedReciprocalFast(area);
 #ifdef CC_BUILD_SOFTFP_PERSPECTIVE4
-            if (!perspectiveShift) {
-                perspectiveShift = SoftFP_SelectPerspectiveShift(A, B, C, factor, minW);
+                if (!perspectiveShift) {
+                    perspectiveShift = SoftFP_SelectPerspectiveShift(A, B, C, factor, minW);
+                }
+#endif
+                DrawPolygonFastTerrainAffine(A, B, C, D, 4, area, factor,
+                                             fastMapMode);
+                return;
+            }
+#else
+            {
+                int factor = FixedReciprocalFast(area);
+#ifdef CC_BUILD_SOFTFP_PERSPECTIVE4
+                if (!perspectiveShift) {
+                    perspectiveShift = SoftFP_SelectPerspectiveShift(A, B, C, factor, minW);
+                }
+#endif
+                DrawQuadFastTerrain(inVerts, area, factor, perspectiveShift);
+                return;
             }
 #endif
-#ifdef CC_BUILD_ESP32S3
-            DrawPolygonFastTerrainAffine(A, B, C, D, 4, area, factor,
-                                         fastMapMode);
-            rasterTerrainQuads++;
-#else
-            DrawQuadFastTerrain(inVerts, area, factor, perspectiveShift);
-#endif
-            return;
         }
     }
     }
@@ -5775,7 +5718,6 @@ void Gfx_EndFrame(void) {
     holo_perf_add(HOLO_PERF_PERSPECTIVE_RECIPROCALS, rasterPerspectiveReciprocals);
     holo_perf_add(HOLO_PERF_RASTER_QUADS, rasterTerrainQuads);
     holo_perf_add(HOLO_PERF_OPAQUE_LUT_QUADS, rasterOpaqueLutQuads);
-    holo_perf_add(HOLO_PERF_OPAQUE_BLOCK4_PIXELS, rasterOpaqueBlock4Pixels);
     holo_perf_add(HOLO_PERF_HIZ_CELL_SKIP_PIXELS, rasterHiZCellSkipPixels);
     holo_perf_add(HOLO_PERF_SPRITE_QUADS, rasterSpriteQuads);
     holo_perf_add(HOLO_PERF_SPRITE_CULL, rasterSpriteCull);

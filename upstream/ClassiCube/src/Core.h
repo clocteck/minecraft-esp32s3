@@ -579,10 +579,9 @@ typedef cc_uint8  cc_bool;
 	 * later quads. This overlaps raster work with cull/transform/setup without
 	 * reusing or skipping a generated frame. */
 	#define CC_BUILD_SOFTFP_CORE0_RASTER
-	/* Process four fully visible opaque terrain pixels as one aligned block.
-	 * Depth remains exact per pixel; texture colour is sampled once per four
-	 * horizontal pixels, matching the intended low-resolution PS1-style look. */
-	#define CC_BUILD_SOFTFP_OPAQUE_BLOCK4
+	/* Keep opaque terrain texture sampling exact per raster pixel. Sharing one
+	 * texel across four horizontal pixels made the 192->320 upscale visibly
+	 * smear grass and dirt across six or seven physical LCD pixels. */
 	/* Fog is intentionally disabled on ESP32-S3. Ordered screen-door fog was
 	 * fast but visibly granular at 192x144, while smooth per-pixel fog costs
 	 * too much of the full-frame budget. */
