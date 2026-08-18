@@ -313,7 +313,6 @@ for (yy = -1; yy < 17; ++yy) {\
 
 static cc_bool ReadBorderChunkData(int x1, int y1, int z1, cc_bool* outAllAir) {
 	BlockRaw* blocks = World.Blocks;
-	BlockRaw* blocks2;
 	cc_bool allAir = true;
 	int index, cIndex;
 	BlockID block;
@@ -322,6 +321,7 @@ static cc_bool ReadBorderChunkData(int x1, int y1, int z1, cc_bool* outAllAir) {
 #ifndef EXTENDED_BLOCKS
 	ReadBorderChunkBody(blocks[index]);
 #else
+	BlockRaw* blocks2;
 	if (World.IDMask <= 0xFF) {
 		ReadBorderChunkBody(blocks[index]);
 	} else {
@@ -389,6 +389,9 @@ cc_bool Builder_MakeChunk(struct ChunkInfo* info) {
 	Builder_BitFlags = bitFlags;
 	Builder_PrePrepareChunk();
 	
+#if defined CC_BUILD_ESP32S3 && defined CC_BUILD_SOFTFP_QUAD_FRUSTUM_CULL
+	info->meshVertices = 0;
+#endif
 	onBorder = 
 		x1 == 0 || y1 == 0 || z1 == 0   || x1 + CHUNK_SIZE >= World.Width ||
 		y1 + CHUNK_SIZE >= World.Height || z1 + CHUNK_SIZE >= World.Length;
@@ -472,6 +475,7 @@ cc_bool Builder_MakeChunk(struct ChunkInfo* info) {
 	Gfx_PackMapVb(&info->vb, totalVerts, x1, y1, z1);
 	info->softCullBounds = Gfx_CreateMapCullBounds(
 		info->vb, totalVerts, x1, y1, z1);
+	info->meshVertices = (cc_uint32)totalVerts;
 #endif
 #endif
 	return true;
@@ -664,7 +668,7 @@ static int NormalBuilder_StretchZ(int countIndex, int x, int y, int z, int chunk
 	return count;
 }
 
-static void NormalBuilder_RenderBlock(int index, int x, int y, int z) {	
+static void NormalBuilder_RenderBlock(int index, int x, int y, int z) {
 	/* counters */
 	int count_XMin, count_XMax, count_ZMin;
 	int count_ZMax, count_YMin, count_YMax;

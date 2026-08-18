@@ -228,14 +228,18 @@ macro(project_so project_name)
             string(REPLACE "/" "_" obj_file_name ${c_file_rel})
             string(REPLACE ".c" ".o" obj_file_name ${obj_file_name})
             set(obj_file "${so_obj_dir}/${obj_file_name}")
+            set(dep_file "${obj_file}.d")
             list(APPEND so_obj_files ${obj_file})
 
             # Compile C file to .o file with ESP-IDF includes and definitions
             # Use list variables directly, not strings
             add_custom_command(OUTPUT ${obj_file}
                     COMMAND ${CMAKE_COMMAND} -E make_directory ${so_obj_dir}
-                    COMMAND ${CMAKE_C_COMPILER} ${so_compile_flags} ${def_flags} ${include_flags} ${c_file} -o ${obj_file}
+                    COMMAND ${CMAKE_C_COMPILER} ${so_compile_flags} ${def_flags} ${include_flags}
+                            -MMD -MP -MF ${dep_file} -MT ${obj_file}
+                            ${c_file} -o ${obj_file}
                     DEPENDS ${c_file}
+                    DEPFILE ${dep_file}
                     COMMENT "Compile ${c_file} to ${obj_file_name}"
                     )
         endforeach()

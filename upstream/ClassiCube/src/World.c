@@ -141,7 +141,13 @@ void World_SetBlock(int x, int y, int z, BlockID block) {
 #endif
 
 BlockID World_GetPhysicsBlock(int x, int y, int z) {
+#ifdef CC_BUILD_ESP32S3
+	/* Let players fall through the dug-out map floor or walk beyond the map.
+	 * LocalPlayer_Tick returns them to spawn after a short visible fall. */
+	if (y < 0 || !World_ContainsXZ(x, z)) return BLOCK_AIR;
+#else
 	if (y < 0 || !World_ContainsXZ(x, z)) return BLOCK_BEDROCK;
+#endif
 	if (y >= World.Height) return BLOCK_AIR;
 
 	return World_GetBlock(x, y, z);
@@ -167,7 +173,12 @@ void Env_Reset(void) {
 	Env.CloudsHeight = -1;
 
 	Env.EdgeBlock  = BLOCK_STILL_WATER;
+#ifdef CC_BUILD_ESP32S3
+	/* Preserve the ocean horizon without an invisible solid bedrock wall. */
+	Env.SidesBlock = BLOCK_AIR;
+#else
 	Env.SidesBlock = BLOCK_BEDROCK;
+#endif
 
 	Env.CloudsSpeed    = 1.0f;
 	Env.WeatherSpeed   = 1.0f;

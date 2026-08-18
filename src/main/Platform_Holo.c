@@ -290,16 +290,43 @@ cc_result File_OpenOrCreate(cc_file *file, const cc_filepath *path)
 
 cc_result File_Read(cc_file file, void *data, cc_uint32 count, cc_uint32 *bytesRead)
 {
-    const module_host_api_v2 *host = holo_port_host(); size_t done = 0;
-    int32_t result = host && host->file.read ? host->file.read(file_ptr(file), data, count, &done) : ERR_NOT_SUPPORTED;
-    *bytesRead = (cc_uint32)done; return result;
+    const module_host_api_v2 *host = holo_port_host();
+    cc_uint8 *dst = (cc_uint8 *)data;
+    cc_uint32 total = 0;
+    int32_t result = MODULE_OK;
+    if (!host || !host->file.read) { *bytesRead = 0; return ERR_NOT_SUPPORTED; }
+
+    /* The host's CachedFile allocates an internal-RAM physical-I/O scratch
+     * buffer as large as the request. Keep requests below the late-runtime
+     * largest free block so screenshots and map saves remain reliable. */
+    while (total < count) {
+        size_t done = 0;
+        cc_uint32 want = min(count - total, 512u);
+        result = host->file.read(file_ptr(file), dst + total, want, &done);
+        total += (cc_uint32)done;
+        if (result != MODULE_OK || done < want) break;
+    }
+    *bytesRead = total;
+    return result;
 }
 
 cc_result File_Write(cc_file file, const void *data, cc_uint32 count, cc_uint32 *bytesWrote)
 {
-    const module_host_api_v2 *host = holo_port_host(); size_t done = 0;
-    int32_t result = host && host->file.write ? host->file.write(file_ptr(file), data, count, &done) : ERR_NOT_SUPPORTED;
-    *bytesWrote = (cc_uint32)done; return result;
+    const module_host_api_v2 *host = holo_port_host();
+    const cc_uint8 *src = (const cc_uint8 *)data;
+    cc_uint32 total = 0;
+    int32_t result = MODULE_OK;
+    if (!host || !host->file.write) { *bytesWrote = 0; return ERR_NOT_SUPPORTED; }
+
+    while (total < count) {
+        size_t done = 0;
+        cc_uint32 want = min(count - total, 512u);
+        result = host->file.write(file_ptr(file), src + total, want, &done);
+        total += (cc_uint32)done;
+        if (result != MODULE_OK || done < want) break;
+    }
+    *bytesWrote = total;
+    return result;
 }
 
 cc_result File_Close(cc_file file)

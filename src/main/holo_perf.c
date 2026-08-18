@@ -18,7 +18,7 @@ typedef struct HoloPerfCounters {
 } HoloPerfCounters;
 
 typedef struct HoloLogBuilder {
-    char data[672];
+    char data[896];
     size_t length;
 } HoloLogBuilder;
 
@@ -33,6 +33,9 @@ static uint8_t s_frame_active;
 static int32_t s_pose_x100, s_pose_y100, s_pose_z100;
 static int32_t s_pose_yaw100, s_pose_pitch100;
 static uint32_t s_pose_world_vertices;
+static uint32_t s_map_view_distance, s_map_render_distance, s_map_visible_chunks;
+static uint32_t s_map_resident_chunks, s_map_pending_chunks;
+static uint32_t s_map_failed_chunks, s_map_mesh_vertices;
 
 static void counters_clear(HoloPerfCounters *counters)
 {
@@ -148,6 +151,12 @@ static void report_window(uint64_t now_us)
     log_append_avg_ms(&line, " mapupd=", s_total.slots[HOLO_PERF_MAP_UPDATE]);
     log_append_avg_ms(&line, " opaque=", s_total.slots[HOLO_PERF_MAP_OPAQUE]);
     log_append_avg_ms(&line, " trans=", s_total.slots[HOLO_PERF_MAP_TRANSLUCENT]);
+    log_append_avg_ms(&line, " pre3d=", s_total.slots[HOLO_PERF_SCENE_PRE_MAP]);
+    log_append_avg_ms(&line, " mid3d=", s_total.slots[HOLO_PERF_SCENE_MID_MAP]);
+    log_append_avg_ms(&line, " post3d=", s_total.slots[HOLO_PERF_SCENE_POST_MAP]);
+    log_append_avg_ms(&line, " held=", s_total.slots[HOLO_PERF_HELD_BLOCK]);
+    log_append_avg_ms(&line, " sides=", s_total.slots[HOLO_PERF_MAP_SIDES]);
+    log_append_avg_ms(&line, " shSel=", s_total.slots[HOLO_PERF_SHADOW_SELECTION]);
     log_append_avg_ms(&line, " build=", s_total.slots[HOLO_PERF_CHUNK_BUILD]);
     log_append_avg_ms(&line, " clear=", s_total.slots[HOLO_PERF_CLEAR]);
     log_append_avg_ms(&line, " scale=", s_total.slots[HOLO_PERF_UPSCALE]);
@@ -155,8 +164,13 @@ static void report_window(uint64_t now_us)
     log_append_avg_ms(&line, " draw2d=", s_total.slots[HOLO_PERF_DRAW2D]);
     log_append_avg_ms(&line, " conv=", s_total.slots[HOLO_PERF_CONVERT]);
     log_append_avg_ms(&line, " dma=", s_total.slots[HOLO_PERF_DMA]);
-    log_append_avg_ms(&line, " clear0=", s_total.slots[HOLO_PERF_ASYNC_CLEAR]);
     log_append_avg_ms(&line, " wait0=", s_total.slots[HOLO_PERF_ASYNC_WAIT]);
+    log_append_avg_ms(&line, " qCull=", s_total.slots[HOLO_PERF_MAP_CULL]);
+    log_append_avg_ms(&line, " qXf=", s_total.slots[HOLO_PERF_MAP_XFORM]);
+    log_append_avg_ms(&line, " qProj=", s_total.slots[HOLO_PERF_MAP_PROJECT]);
+    log_append_avg_ms(&line, " qDraw=", s_total.slots[HOLO_PERF_MAP_DRAW]);
+    log_append_avg_ms(&line, " qSet=", s_total.slots[HOLO_PERF_MAP_SETUP]);
+    log_append_avg_ms(&line, " qRast=", s_total.slots[HOLO_PERF_MAP_RASTER]);
     holo_port_log(line.data);
 
     line.length = 0; line.data[0] = '\0';
@@ -166,9 +180,6 @@ static void report_window(uint64_t now_us)
     log_append_avg_count(&line, " bboxpx=", s_total.bbox_pixels);
     log_append_avg_count(&line, " chunks=", s_total.chunk_builds);
     log_append_avg_count(&line, " dmaN=", s_total.dma_submits);
-    log_append_avg_count(&line, " zHit=", s_total.slots[HOLO_PERF_DEPTH_TILE_HIT]);
-    log_append_avg_count(&line, " zMiss=", s_total.slots[HOLO_PERF_DEPTH_TILE_MISS]);
-    log_append_avg_count(&line, " zWB=", s_total.slots[HOLO_PERF_DEPTH_TILE_WRITEBACK]);
     log_append_avg_count(&line, " spanpx=", s_total.slots[HOLO_PERF_RASTER_SPAN_PIXELS]);
     log_append_avg_count(&line, " texHit=", s_total.slots[HOLO_PERF_TEXTURE_REUSE]);
     log_append_avg_count(&line, " texMiss=", s_total.slots[HOLO_PERF_TEXTURE_LOAD]);
@@ -179,11 +190,26 @@ static void report_window(uint64_t now_us)
     log_append_avg_count(&line, " perspRc=", s_total.slots[HOLO_PERF_PERSPECTIVE_RECIPROCALS]);
     log_append_avg_count(&line, " rQuad=", s_total.slots[HOLO_PERF_RASTER_QUADS]);
     log_append_avg_count(&line, " oLutQ=", s_total.slots[HOLO_PERF_OPAQUE_LUT_QUADS]);
-    log_append_avg_count(&line, " oNoFogQ=", s_total.slots[HOLO_PERF_OPAQUE_NOFOG_QUADS]);
     log_append_avg_count(&line, " sprQ=", s_total.slots[HOLO_PERF_SPRITE_QUADS]);
     log_append_avg_count(&line, " sprCull=", s_total.slots[HOLO_PERF_SPRITE_CULL]);
-    log_append_avg_count(&line, " cutPx=", s_total.slots[HOLO_PERF_FAST_CUTOUT_PIXELS]);
-    log_append_avg_count(&line, " fogPx=", s_total.slots[HOLO_PERF_FOG_PIXELS]);
+    log_append_avg_count(&line, " uiFast=", s_total.slots[HOLO_PERF_UI_FAST_SPRITES]);
+    log_append_avg_count(&line, " uiGen=", s_total.slots[HOLO_PERF_UI_GENERIC_SPRITES]);
+    log_append_avg_count(&line, " uiPx=", s_total.slots[HOLO_PERF_UI_SPRITE_PIXELS]);
+    log_append_avg_count(&line, " cellSkip=", s_total.slots[HOLO_PERF_HIZ_CELL_SKIP_PIXELS]);
+    log_append_avg_count(&line, " blk4Px=", s_total.slots[HOLO_PERF_OPAQUE_BLOCK4_PIXELS]);
+    log_append_avg_count(&line, " frCull=", s_total.slots[HOLO_PERF_FRUSTUM_CULL]);
+    log_append_avg_count(&line, " bfCull=", s_total.slots[HOLO_PERF_BACKFACE_CULL]);
+    log_append_avg_count(&line, " tmpCull=", s_total.slots[HOLO_PERF_TEMPORAL_CULL]);
+    log_append_avg_count(&line, " rangeH=", s_total.slots[HOLO_PERF_RANGE_CACHE_HIT]);
+    log_append_avg_count(&line, " rangeM=", s_total.slots[HOLO_PERF_RANGE_CACHE_MISS]);
+    log_append_avg_count(&line, " frGrp=", s_total.slots[HOLO_PERF_FRUSTUM_GROUP_CULL]);
+    log_append_avg_count(&line, " hizQC=", s_total.slots[HOLO_PERF_CURRENT_HIZ_CULL]);
+    log_append_avg_count(&line, " prevQC=", s_total.slots[HOLO_PERF_PREVIOUS_HIZ_CULL]);
+    log_append_avg_count(&line, " prevBC=", s_total.slots[HOLO_PERF_PREVIOUS_BOUNDS_CULL]);
+    log_append_avg_count(&line, " c0Job=", s_total.slots[HOLO_PERF_CORE0_RASTER_JOBS]);
+    log_append_avg_count(&line, " c0Fb=", s_total.slots[HOLO_PERF_CORE0_RASTER_FALLBACKS]);
+    log_append_avg_count(&line, " c0Fl=", s_total.slots[HOLO_PERF_CORE0_RASTER_FLUSHES]);
+    log_append_avg_count(&line, " c0Bt=", s_total.slots[HOLO_PERF_CORE0_RASTER_BATCHES]);
     if (host && host->heap.free_size) {
         internal_free = host->heap.free_size(MODULE_HEAP_INTERNAL | MODULE_HEAP_8BIT);
         psram_free = host->heap.free_size(MODULE_HEAP_PSRAM | MODULE_HEAP_8BIT);
@@ -202,6 +228,25 @@ static void report_window(uint64_t now_us)
     log_append_text(&line, " hotFb=");
     log_append_u64(&line, holo_port_hot_vb_fallbacks());
     log_append_text(&line, " psramFree="); log_append_u64(&line, psram_free);
+    holo_port_log(line.data);
+
+    line.length = 0; line.data[0] = '\0';
+    log_append_text(&line, "[cc.perf.map] view=");
+    log_append_u64(&line, s_map_view_distance);
+    log_append_text(&line, " render=");
+    log_append_u64(&line, s_map_render_distance);
+    log_append_text(&line, " visible=");
+    log_append_u64(&line, s_map_visible_chunks);
+    log_append_text(&line, " mesh=");
+    log_append_u64(&line, s_map_resident_chunks);
+    log_append_text(&line, " pending=");
+    log_append_u64(&line, s_map_pending_chunks);
+    log_append_text(&line, " fail=");
+    log_append_u64(&line, s_map_failed_chunks);
+    log_append_text(&line, " meshV=");
+    log_append_u64(&line, s_map_mesh_vertices);
+    log_append_text(&line, " vbKB=");
+    log_append_u64(&line, ((uint64_t)s_map_mesh_vertices * 12U + 1023U) / 1024U);
     holo_port_log(line.data);
 
     line.length = 0; line.data[0] = '\0';
@@ -278,4 +323,18 @@ void holo_perf_set_pose(int32_t x100, int32_t y100, int32_t z100,
     s_pose_x100 = x100; s_pose_y100 = y100; s_pose_z100 = z100;
     s_pose_yaw100 = yaw100; s_pose_pitch100 = pitch100;
     s_pose_world_vertices = world_vertices;
+}
+
+void holo_perf_set_map_state(uint32_t view_distance, uint32_t render_distance,
+                             uint32_t visible_chunks,
+                             uint32_t resident_chunks, uint32_t pending_chunks,
+                             uint32_t failed_chunks, uint32_t mesh_vertices)
+{
+    s_map_view_distance  = view_distance;
+    s_map_render_distance = render_distance;
+    s_map_visible_chunks = visible_chunks;
+    s_map_resident_chunks = resident_chunks;
+    s_map_pending_chunks = pending_chunks;
+    s_map_failed_chunks  = failed_chunks;
+    s_map_mesh_vertices  = mesh_vertices;
 }

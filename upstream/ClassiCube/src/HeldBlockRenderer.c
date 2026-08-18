@@ -37,7 +37,11 @@ static void HeldBlockRenderer_RenderModel(void) {
 
 	Gfx_SetFaceCulling(true);
 	Gfx_SetDepthTest(false);
-	/* Gfx_SetDepthWrite(false); */
+#ifdef CC_BUILD_ESP32S3
+	/* The held model is the final 3D pass, so its depth values are never read.
+	 * Disabling writes also selects the dedicated no-depth software kernel. */
+	Gfx_SetDepthWrite(false);
+#endif
 	/* TODO: Need to properly reallocate per model VB here */
 
 	if (Blocks.Draw[held_block] == DRAW_GAS) {
@@ -59,7 +63,9 @@ static void HeldBlockRenderer_RenderModel(void) {
 	}
 	
 	Gfx_SetDepthTest(true);
-	/* Gfx_SetDepthWrite(true); */
+#ifdef CC_BUILD_ESP32S3
+	Gfx_SetDepthWrite(true);
+#endif
 	Gfx_SetFaceCulling(false);
 }
 

@@ -12,7 +12,7 @@
 #define CLASSICUBE_3D_WIDTH       192
 #define CLASSICUBE_3D_HEIGHT      144
 #define CLASSICUBE_COLOR_BAND_ROWS 48
-#define CLASSICUBE_COLOR_SMALL_BAND_ROWS 16
+#define CLASSICUBE_COLOR_SMALL_BAND_ROWS 12
 #define CLASSICUBE_DISPLAY_WIDTH  320
 #define CLASSICUBE_DISPLAY_HEIGHT 240
 #define CLASSICUBE_UI_DPI_SCALE   0.50f
@@ -53,11 +53,6 @@ uint32_t holo_port_hot_vb_reserved(void);
 uint32_t holo_port_hot_vb_used(void);
 uint32_t holo_port_hot_vb_count(void);
 uint32_t holo_port_hot_vb_fallbacks(void);
-
-bool holo_port_presenter_async_available(void);
-bool holo_port_presenter_take_precleared_color(const void *pixels, uint16_t color);
-void holo_port_presenter_schedule_clears(uint16_t color, uint32_t *depth,
-                                         size_t depth_words, uint32_t depth_value);
 
 void holo_port_set_last_error(const char *message);
 const char *holo_port_last_error(void);

@@ -13,6 +13,9 @@
 #include "Picking.h"
 #include "Platform.h"
 #include "Protocol.h"
+#ifdef CC_BUILD_ESP32S3
+#include "Utils.h"
+#endif
 
 struct _CameraData Camera;
 static struct RayTracer cameraClipPos;
@@ -50,7 +53,15 @@ void Camera_KeyLookUpdate(float delta) {
 static void PerspectiveCamera_GetProjection(struct Matrix* proj) {
 	float fovy = Camera.Fov * MATH_DEG2RAD;
 	float aspectRatio = (float)Game.Width / (float)Game.Height;
-	Gfx_CalcPerspectiveMatrix(proj, fovy, aspectRatio, (float)Game_ViewDistance);
+	float zFar = (float)Game_ViewDistance;
+#ifdef CC_BUILD_ESP32S3
+	/* MapRenderer applies the user-visible 3D AABB radius itself. Keep the
+	 * projection far plane beyond every corner of a retained 16^3 chunk, so a
+	 * chunk does not pop out merely because it moves from the side of the view
+	 * to the centre while the player rotates in place. */
+	zFar = (float)(Utils_AdjViewDist(Game_ViewDistance) + 24);
+#endif
+	Gfx_CalcPerspectiveMatrix(proj, fovy, aspectRatio, zFar);
 }
 
 static void PerspectiveCamera_GetView(struct Matrix* mat) {

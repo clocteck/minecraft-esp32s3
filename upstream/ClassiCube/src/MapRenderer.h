@@ -55,6 +55,7 @@ struct ChunkInfo {
 #if defined CC_BUILD_ESP32S3 && defined CC_BUILD_SOFTFP_QUAD_FRUSTUM_CULL
 	cc_uint8 softClipPlanes; /* Chunk-intersecting planes for the software map culler */
 	void* softCullBounds;    /* Compact per-quad bounds, separate from the vertex stream */
+	cc_uint32 meshVertices;  /* Packed mesh size diagnostic (12 bytes per vertex) */
 #endif
 #ifdef OCCLUSION
 	public cc_bool Visited = false, Occluded = false;
@@ -75,6 +76,10 @@ void MapRenderer_RenderTranslucent(float delta);
 /* Potentially builds meshes for several nearby chunks. */
 /* NOTE: This should be called once per frame. */
 void MapRenderer_Update(float delta);
+
+/* Current radius used for chunk visibility. On constrained targets this may
+   be lower than the configured maximum while a complex view is on screen. */
+int MapRenderer_GetEffectiveViewDistance(void);
 
 /* Marks the given chunk as needing to be rebuilt/redrawn. */
 /* NOTE: Coordinates outside the map are simply ignored. */

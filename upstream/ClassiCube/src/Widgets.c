@@ -442,6 +442,9 @@ static void HotbarWidget_BuildEntriesMesh(struct HotbarWidget* w, struct VertexT
 	int i, x, y;
 	float scale;
 
+#ifdef CC_BUILD_ESP32S3
+	Gfx_HotbarCacheInvalidate();
+#endif
 	IsometricDrawer_BeginBatch(*vertices, w->state);
 	scale = w->elemSize / 2.0f;
 
@@ -476,6 +479,14 @@ static void HotbarWidget_RenderOutline(struct HotbarWidget* w, int offset) {
 
 static void HotbarWidget_RenderEntries(struct HotbarWidget* w, int offset) {
 	if (w->verticesCount == 0) return;
+#ifdef CC_BUILD_ESP32S3
+	if (Gfx_HotbarCacheReplay()) return;
+	if (Gfx_HotbarCacheBegin()) {
+		IsometricDrawer_Render(w->verticesCount, offset, w->state);
+		Gfx_HotbarCacheEnd();
+		return;
+	}
+#endif
 	IsometricDrawer_Render(w->verticesCount, offset, w->state);
 }
 
@@ -832,7 +843,7 @@ static void TableWidget_BuildMesh(void* widget, struct VertexTextured** vertices
 
 static int TableWidget_Render2(void* widget, int offset) {
 	struct TableWidget* w = (struct TableWidget*)widget;
-	int cellSizeX, cellSizeY, size;
+	int cellSizeX, size;
 	float off;
 	int x, y;
 
@@ -852,7 +863,6 @@ static int TableWidget_Render2(void* widget, int offset) {
 	}
 
 	cellSizeX = w->cellSizeX;
-	cellSizeY = w->cellSizeY;
 	if (w->selectedIndex != -1 && Gui.ClassicInventory && w->blocks[w->selectedIndex] != BLOCK_AIR) {
 		TableWidget_GetCoords(w, w->selectedIndex, &x, &y);
 

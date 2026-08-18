@@ -29,16 +29,25 @@ every covered depth cell proves it hidden. Chunk-local bounds use conservative
 RGB565 stores, and an eight-entry tint LUT replaces per-pixel colour multiplies
 without changing the resulting RGB565 value. Near-plane raster edge coordinates
 use a range that remains safe when the camera is very close to geometry. A
-four-way temporal Hi-Z cache reuses only exact-view conservative screen bounds;
-geometry changes invalidate it. Terrain and models use PS1-style affine texture
-mapping with full-rate texel sampling. The ESP32-S3 hot path shares one compact
-affine triangle/quad kernel, advances interpolation planes by scanline, batches
-Hi-Z coverage bits, and caches final shaded opaque terrain tiles internally.
+double-buffered temporal Hi-Z cache reuses only exact-view conservative screen
+bounds; geometry changes invalidate it. Terrain uses PS1-style affine texture
+mapping with full-rate sampling, while held/dynamic models retain their exact
+generic path. The ESP32-S3 hot path shares one compact affine triangle/quad
+kernel, advances interpolation planes by scanline, batches Hi-Z coverage bits,
+caches 16 final shaded terrain tiles internally, and submits batches of 32
+complete raster jobs to Core 0.
 Distance fog is disabled: the ordered low-cost variant was visibly granular at
 192x144, while smooth per-pixel fog consumed too much of the full-frame budget.
-Two 48-row and two 16-row RGB565 colour bands keep 128 of 144 raster rows
-(49,152 bytes) in internal RAM; the dynamic-VB arena is 12 KiB, with its colder
+Two 48-row and two 12-row RGB565 colour bands keep 120 of 144 raster rows
+(46,080 bytes) in internal RAM; the dynamic-VB arena is 12 KiB, with its colder
 tail falling back to PSRAM so the mandatory DMA buffers retain priority.
+
+The user view distance is a maximum of 36 blocks. The renderer keeps voxel data,
+resident meshes, and visible meshes on separate distance budgets: one extra
+chunk ring is prebuilt, a second ring provides eviction hysteresis, and the
+visible radius adapts between 20 and the requested maximum when a complex view
+would otherwise fall below the 20 FPS budget. This prevents the old rotate-in-
+place holes without silently treating a missing mesh as distance fog.
 
 For repeatable profiling, serial output includes camera position, yaw, pitch,
 world mesh vertex count, submitted quads, raster primitives, bounding-box/span
@@ -52,10 +61,12 @@ pose and pipeline statistics remain on serial. Generated still liquids remain
 static to avoid continuous background remeshing, while player-placed liquids
 still flow.
 
-On the fixed spawn view, the current full-frame path measures about 41.2-41.6 ms
-per frame (roughly 24 FPS): about 31 ms is 3D work and 7.5-7.7 ms is native
-UI/upscaling. The next target is a real 28 FPS (35.7 ms) newly generated frame;
-display refresh or an unchanged-frame shortcut does not count toward it.
+At fixed view distance 20, the worst fixed-seed view measures about 36.3-37.0 ms
+per complete frame (roughly 27.0-27.4 FPS); simpler directions reach about
+31-40 FPS. With maximum view distance 36, open directions retain the full radius
+at about 25-32 FPS, while the tested worst view settles at an effective radius
+of 26 and about 21.2-21.7 FPS. These are device measurements of newly generated
+frames, not display refreshes or unchanged-frame shortcuts.
 
 Sound effects use one host-owned mono I2S stream. Up to eight virtual voices
 are mixed by a PSRAM-stack worker pinned to Core 0; sound samples remain in

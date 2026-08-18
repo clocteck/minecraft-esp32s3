@@ -11,6 +11,9 @@
 static GfxResourceID selOutline_vb;
 static float base_size;
 static PackedCol color;
+static Vec3 cached_min, cached_max;
+static float cached_size, cached_offset;
+static cc_bool cached_mesh_valid;
 #define SELOUTLINE_NUM_VERTICES (16 * 6)
 
 #define SelOutline_Y(y)\
@@ -60,6 +63,16 @@ static void BuildMesh(struct RayTracer* selected) {
 	if (dist <  4.0f *  4.0f) scale = 1.0f / 128.0f;
 	if (dist <  2.0f *  2.0f) scale = 1.0f / 192.0f;
 	size = base_size * scale;
+
+	/* Rotation changes only the MVP. Rebuild these world-space vertices when
+	 * the selected bounds or one of the distance-dependent width buckets
+	 * actually changes, rather than preprocessing all 96 vertices every frame. */
+	if (cached_mesh_valid && Vec3_Equals(&cached_min, &selected->Min) &&
+		Vec3_Equals(&cached_max, &selected->Max) &&
+		cached_size == size && cached_offset == offset) {
+		Gfx_BindDynamicVb(selOutline_vb);
+		return;
+	}
 	
 	/*  How a face is laid out: 
 	                 #--#-------#--#<== OUTER_MAX (3)
@@ -90,6 +103,11 @@ static void BuildMesh(struct RayTracer* selected) {
 		ptr->Col = color;
 	}
 	Gfx_UnlockDynamicVb(selOutline_vb);
+	cached_min = selected->Min;
+	cached_max = selected->Max;
+	cached_size = size;
+	cached_offset = offset;
+	cached_mesh_valid = true;
 }
 
 void SelOutlineRenderer_Render(struct RayTracer* selected, cc_bool dirty) {
@@ -116,6 +134,7 @@ void SelOutlineRenderer_Render(struct RayTracer* selected, cc_bool dirty) {
 *#########################################################################################################################*/
 static void OnContextLost(void* obj) {
 	Gfx_DeleteDynamicVb(&selOutline_vb);
+	cached_mesh_valid = false;
 }
 
 static void OnInit(void) {

@@ -19,6 +19,7 @@
 #include "Particle.h"
 #include "Options.h"
 #include "Entity.h"
+#include "MapRenderer.h"
 
 cc_bool EnvRenderer_Legacy, EnvRenderer_Minimal;
 
@@ -818,7 +819,41 @@ static void RenderBorders(BlockID block, GfxResourceID vb, GfxResourceID tex, in
 	Gfx_RestoreAlphaState(Blocks.Draw[block]);
 }
 
+#ifdef CC_BUILD_ESP32S3
+/* Border meshes include the world-bottom plane plus the four outside skirts.
+ * Do not submit them when every such surface is conservatively farther than
+ * the configured view distance. This removes large fully hidden quads without
+ * changing what can appear inside the frustum near an edge or the world floor. */
+static cc_bool EnvRenderer_BordersOutsideHorizontalView(void) {
+	float margin = (float)MapRenderer_GetEffectiveViewDistance() + 1.0f;
+	Vec3 pos = Camera.CurrentPos;
+	return pos.x > margin && pos.x < (float)World.Width  - margin &&
+	       pos.z > margin && pos.z < (float)World.Length - margin;
+}
+
+/* When all four world borders are outside the horizontal radius, only the
+ * world-bottom plane could still be visible. Test the portion of that plane
+ * inside the spherical view radius against the actual camera frustum. This
+ * avoids rasterising a full, terrain-occluded floor while looking level, but
+ * restores it when looking down far enough for it to enter the view. */
+static cc_bool EnvRenderer_FloorOutsideView(void) {
+	float radius = (float)MapRenderer_GetEffectiveViewDistance() + 1.0f;
+	float dy = Math_AbsF(Camera.CurrentPos.y);
+	float horizontalSq, horizontal;
+	if (dy >= radius) return true;
+
+	horizontalSq = radius * radius - dy * dy;
+	horizontal   = Math_SqrtF(horizontalSq);
+	return Frustum_TestAABB(Camera.CurrentPos.x, 0.0f, Camera.CurrentPos.z,
+			horizontal, 0.05f, horizontal) == FRUSTUM_OUTSIDE;
+}
+#endif
+
 void EnvRenderer_RenderMapSides(void) {
+#ifdef CC_BUILD_ESP32S3
+	if (EnvRenderer_BordersOutsideHorizontalView() &&
+		EnvRenderer_FloorOutsideView()) return;
+#endif
 	if (!sides_vb) {
 		BuildMapSides();
 		if (!sides_vb) return;
@@ -832,6 +867,9 @@ void EnvRenderer_RenderMapEdges(void) {
 	/* Fixes some 'depth bleeding through' issues with 16 bit depth buffers on large maps */
 	int yVisible = min(0, Env_SidesHeight);
 	if (Camera.CurrentPos.y < yVisible && sides_vb) return;
+#ifdef CC_BUILD_ESP32S3
+	if (EnvRenderer_BordersOutsideHorizontalView()) return;
+#endif
 
 	if (!edges_vb) {
 		BuildMapEdges();

@@ -58,6 +58,9 @@ int     Game_FpsLimit, Game_Vertices;
 cc_bool Game_SimpleArmsAnim;
 static float gfx_minFrameMs;
 static cc_bool autoPause;
+#ifdef CC_BUILD_ESP32S3
+#define HOLO_MAX_VIEW_DISTANCE 36
+#endif
 
 cc_bool Game_ClassicMode, Game_ClassicHacks;
 cc_bool Game_AllowCustomBlocks;
@@ -378,7 +381,12 @@ static void LoadOptions(void) {
 	Game_AllowServerTextures = !Game_ClassicMode && Options_GetBool(OPT_SERVER_TEXTURES,    true);
 
 #ifdef CC_BUILD_ESP32S3
-	Game_ViewDistance     = Options_GetInt(OPT_VIEW_DISTANCE, 4, 4096, 20);
+	/* 36 blocks is the upper gameplay/cache budget on this target. The map
+	 * renderer may adapt the effective radius down to its 20-block floor when
+	 * a complex view would otherwise miss the 20 FPS target. */
+	Game_MaxViewDistance  = HOLO_MAX_VIEW_DISTANCE;
+	Game_ViewDistance     = Options_GetInt(OPT_VIEW_DISTANCE, 4,
+		HOLO_MAX_VIEW_DISTANCE, HOLO_MAX_VIEW_DISTANCE);
 #else
 	Game_ViewDistance     = Options_GetInt(OPT_VIEW_DISTANCE, 8, 4096, DEFAULT_VIEWDIST);
 #endif
@@ -509,7 +517,8 @@ static void Render3DFrame(float delta, float t) {
 	struct Matrix mvp;
 	Vec3 pos;
 #ifdef CC_BUILD_ESP32S3
-	cc_uint64 perfMark;
+	cc_uint64 perfMark, heldPerfMark, midPerfMark;
+	perfMark = Stopwatch_Measure();
 #endif
 
 	Camera.Active->GetView(&Gfx.View);
@@ -527,6 +536,10 @@ static void Render3DFrame(float delta, float t) {
 	Particles_Render(t);
 	EnvRenderer_RenderSky();
 	EnvRenderer_RenderClouds();
+#ifdef CC_BUILD_ESP32S3
+	holo_perf_add(HOLO_PERF_SCENE_PRE_MAP,
+		Stopwatch_ElapsedMicroseconds(perfMark, Stopwatch_Measure()));
+#endif
 
 #ifdef CC_BUILD_ESP32S3
 	perfMark = Stopwatch_Measure();
@@ -538,14 +551,28 @@ static void Render3DFrame(float delta, float t) {
 #endif
 	MapRenderer_RenderNormal(delta);
 #ifdef CC_BUILD_ESP32S3
+	Gfx_FlushRasterWorker();
 	holo_perf_add(HOLO_PERF_MAP_OPAQUE, Stopwatch_ElapsedMicroseconds(perfMark, Stopwatch_Measure()));
+	perfMark = Stopwatch_Measure();
+	midPerfMark = perfMark;
 #endif
 	EnvRenderer_RenderMapSides();
+#ifdef CC_BUILD_ESP32S3
+	holo_perf_add(HOLO_PERF_MAP_SIDES,
+		Stopwatch_ElapsedMicroseconds(perfMark, Stopwatch_Measure()));
+	perfMark = Stopwatch_Measure();
+#endif
 
 	EntityShadows_Render();
 	if (Game_SelectedPos.valid && !Game_HideGui) {
 		SelOutlineRenderer_Render(&Game_SelectedPos, true);
 	}
+#ifdef CC_BUILD_ESP32S3
+	holo_perf_add(HOLO_PERF_SHADOW_SELECTION,
+		Stopwatch_ElapsedMicroseconds(perfMark, Stopwatch_Measure()));
+	holo_perf_add(HOLO_PERF_SCENE_MID_MAP,
+		Stopwatch_ElapsedMicroseconds(midPerfMark, Stopwatch_Measure()));
+#endif
 
 	/* Render water over translucent blocks when under the water outside the map for proper alpha blending */
 	pos = Camera.CurrentPos;
@@ -561,6 +588,7 @@ static void Render3DFrame(float delta, float t) {
 	}
 #ifdef CC_BUILD_ESP32S3
 	holo_perf_add(HOLO_PERF_MAP_TRANSLUCENT, Stopwatch_ElapsedMicroseconds(perfMark, Stopwatch_Measure()));
+	perfMark = Stopwatch_Measure();
 #endif
 
 	/* Need to render again over top of translucent block, as the selection outline */
@@ -571,7 +599,16 @@ static void Render3DFrame(float delta, float t) {
 
 	Selections_Render();
 	EntityNames_RenderHovered();
+#ifdef CC_BUILD_ESP32S3
+	heldPerfMark = Stopwatch_Measure();
+#endif
 	if (!Game_HideGui) HeldBlockRenderer_Render(delta);
+#ifdef CC_BUILD_ESP32S3
+	holo_perf_add(HOLO_PERF_HELD_BLOCK,
+		Stopwatch_ElapsedMicroseconds(heldPerfMark, Stopwatch_Measure()));
+	holo_perf_add(HOLO_PERF_SCENE_POST_MAP,
+		Stopwatch_ElapsedMicroseconds(perfMark, Stopwatch_Measure()));
+#endif
 }
 
 static void Render3D_Anaglyph(float delta, float t) {

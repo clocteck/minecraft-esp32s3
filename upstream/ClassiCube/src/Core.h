@@ -570,12 +570,19 @@ typedef cc_uint8  cc_bool;
 	#define CC_BUILD_SOFTFP_FB16
 	#define CC_BUILD_SOFTFP_FLOAT_XFORM
 	#define CC_BUILD_SOFTFP_QUAD_FRUSTUM_CULL
-	#define CC_BUILD_SOFTFP_ASYNC_CLEAR
 	#define CC_BUILD_SOFTFP_LOWRES_RASTER
 	#define CC_BUILD_SOFTFP_W_DEPTH
 	#define CC_BUILD_SOFTFP_W_DEPTH8
 	#define CC_BUILD_SOFTFP_FAST_CUTOUT
 	#define CC_BUILD_SOFTFP_TERRAIN_TILE_CACHE
+	/* Queue complete opaque/cutout terrain jobs on Core 0 while Core 1 prepares
+	 * later quads. This overlaps raster work with cull/transform/setup without
+	 * reusing or skipping a generated frame. */
+	#define CC_BUILD_SOFTFP_CORE0_RASTER
+	/* Process four fully visible opaque terrain pixels as one aligned block.
+	 * Depth remains exact per pixel; texture colour is sampled once per four
+	 * horizontal pixels, matching the intended low-resolution PS1-style look. */
+	#define CC_BUILD_SOFTFP_OPAQUE_BLOCK4
 	/* Fog is intentionally disabled on ESP32-S3. Ordered screen-door fog was
 	 * fast but visibly granular at 192x144, while smooth per-pixel fog costs
 	 * too much of the full-frame budget. */

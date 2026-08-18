@@ -187,6 +187,11 @@ CC_API void Gfx_ClearColor(PackedCol color);
 void Gfx_BeginFrame(void);
 /* Finishes rendering a frame, and swaps it with the back buffer */
 void Gfx_EndFrame(void);
+#ifdef CC_BUILD_ESP32S3
+/* Completes queued disjoint-band software raster work before later 3D passes
+ * read or modify the shared framebuffer/depth buffer. */
+void Gfx_FlushRasterWorker(void);
+#endif
 /* Sets whether to synchronise rendering with monitor refresh to avoid tearing */
 /* NOTE: VSync setting may be unsupported or just ignored */
 void Gfx_SetVSync(cc_bool vsync);
@@ -430,6 +435,13 @@ CC_API void Gfx_DisableTextureOffset(void);
 
 /* Loads given modelview and projection matrices, then calculates the combined MVP matrix */
 void Gfx_LoadMVP(const struct Matrix* view, const struct Matrix* proj, struct Matrix* mvp);
+#ifdef CC_BUILD_ESP32S3
+/* Cache only static 2D isometric hotbar writes; never caches the 3D frame. */
+void Gfx_HotbarCacheInvalidate(void);
+cc_bool Gfx_HotbarCacheReplay(void);
+cc_bool Gfx_HotbarCacheBegin(void);
+void Gfx_HotbarCacheEnd(void);
+#endif
 #if defined CC_BUILD_ESP32S3 && defined CC_BUILD_SOFTFP_QUAD_FRUSTUM_CULL
 cc_uint8 Gfx_GetAABBClipPlanes(float x, float y, float z,
 	float halfX, float halfY, float halfZ);

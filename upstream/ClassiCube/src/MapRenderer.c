@@ -71,6 +71,7 @@ static void ChunkInfo_Init(struct ChunkInfo* chunk, int x, int y, int z) {
 #if defined CC_BUILD_ESP32S3 && defined CC_BUILD_SOFTFP_QUAD_FRUSTUM_CULL
 	chunk->softClipPlanes = 0x3F;
 	chunk->softCullBounds = NULL;
+	chunk->meshVertices   = 0;
 #endif
 
 	chunk->drawXMin = false; chunk->drawXMax = false; chunk->drawZMin = false;
@@ -180,10 +181,14 @@ if (drawMin && drawMax) { \
 
 #ifdef CC_BUILD_ESP32S3
 static cc_bool ChunkUsesFarLod(const struct ChunkInfo* info) {
-	(void)info;
-	/* PS1-style profile: terrain is affine at every distance. Dynamic models
-	 * and UI retain their normal interpolation paths. */
-	return true;
+	float dx = Math_AbsF(Camera.CurrentPos.x - info->centreX) - HALF_CHUNK_SIZE;
+	float dz = Math_AbsF(Camera.CurrentPos.z - info->centreZ) - HALF_CHUNK_SIZE;
+	float fullDetail = min((float)Game_ViewDistance, 28.0f);
+	if (dx < 0.0f) dx = 0.0f;
+	if (dz < 0.0f) dz = 0.0f;
+	/* Geometry stays complete throughout the effective view. Only tiny crossed
+	 * vegetation past 28 blocks uses the far-detail policy below. */
+	return dx * dx + dz * dz > fullDetail * fullDetail;
 }
 #endif
 
@@ -209,7 +214,7 @@ static void RenderNormalBatch(int batch) {
 		hasNormParts[batch] = true;
 #ifdef CC_BUILD_ESP32S3
 		farLod = ChunkUsesFarLod(info);
-		lodHint = farLod ? DRAW_HINT_AFFINE : DRAW_HINT_NONE;
+		lodHint = DRAW_HINT_AFFINE;
 #endif
 
 #if defined CC_BUILD_ESP32S3 && defined CC_BUILD_SOFTFP_QUAD_FRUSTUM_CULL
@@ -289,7 +294,8 @@ static void RenderNormalBatch(int batch) {
 
 		if (!part.spriteCount) continue;
 #ifdef CC_BUILD_ESP32S3
-		/* Distant crossed-plane vegetation is already inside the fog band. */
+		/* Past the 28-block full-detail radius, omit tiny crossed-plane
+		 * vegetation while keeping all solid terrain geometry. */
 		if (farLod) continue;
 #endif
 		offset = part.offset;
@@ -422,7 +428,7 @@ static void RenderTranslucentBatch(int batch) {
 		if (part.offset < 0) continue;
 		hasTranParts[batch] = true;
 #ifdef CC_BUILD_ESP32S3
-		lodHint = ChunkUsesFarLod(info) ? DRAW_HINT_AFFINE : DRAW_HINT_NONE;
+		lodHint = DRAW_HINT_AFFINE;
 #endif
 
 #if CC_GFX_BACKEND != CC_GFX_BACKEND_GL11
@@ -510,6 +516,7 @@ static void DeleteChunk(struct ChunkInfo* chunk) {
 #else
 #if defined CC_BUILD_ESP32S3 && defined CC_BUILD_SOFTFP_QUAD_FRUSTUM_CULL
 	Gfx_DeleteMapCullBounds(&chunk->softCullBounds);
+	chunk->meshVertices = 0;
 #endif
 	Gfx_DeleteVb(&chunk->vb);
 #endif
@@ -743,6 +750,31 @@ static int renderDistSquared;
 /* Max distance from camera that chunks are built within */
 /* Chunks past this distance are automatically unloaded */
 static int buildDistSquared;
+#ifdef CC_BUILD_ESP32S3
+/* Meshes one chunk-ring beyond the visible radius avoid turn/movement holes.
+ * A second ring is the eviction hysteresis, while voxel data remains in the
+ * fixed classic map independently of these mesh distances. */
+static int unloadDistSquared;
+static int dynamicRenderDistance;
+static float dynamicFrameEma;
+static cc_uint8 dynamicSlowFrames, dynamicFastFrames;
+
+static float ChunkAabbDistSquared(const struct ChunkInfo* chunk) {
+	float dx = Math_AbsF(Camera.CurrentPos.x - chunk->centreX) - HALF_CHUNK_SIZE;
+	float dy = Math_AbsF(Camera.CurrentPos.y - chunk->centreY) - HALF_CHUNK_SIZE;
+	float dz = Math_AbsF(Camera.CurrentPos.z - chunk->centreZ) - HALF_CHUNK_SIZE;
+	if (dx < 0.0f) dx = 0.0f;
+	if (dy < 0.0f) dy = 0.0f;
+	if (dz < 0.0f) dz = 0.0f;
+	return dx * dx + dy * dy + dz * dz;
+}
+
+static float ChunkHorizontalCentreDistSquared(const struct ChunkInfo* chunk) {
+	float dx = Camera.CurrentPos.x - chunk->centreX;
+	float dz = Camera.CurrentPos.z - chunk->centreZ;
+	return dx * dx + dz * dz;
+}
+#endif
 
 static int AdjustDist(int dist) {
 	if (dist < CHUNK_SIZE) dist = CHUNK_SIZE;
@@ -750,15 +782,58 @@ static int AdjustDist(int dist) {
 	return (dist + 24) * (dist + 24);
 }
 
+int MapRenderer_GetEffectiveViewDistance(void) {
+#ifdef CC_BUILD_ESP32S3
+	return dynamicRenderDistance ? dynamicRenderDistance : Game_ViewDistance;
+#else
+	return Game_ViewDistance;
+#endif
+}
+
 static void CalcViewDists(void) {
+#ifdef CC_BUILD_ESP32S3
+	int buildDist  = max(Game_UserViewDistance, CHUNK_SIZE) + CHUNK_SIZE;
+	int unloadDist = buildDist + CHUNK_SIZE;
+	if (!dynamicRenderDistance || dynamicRenderDistance > Game_ViewDistance) {
+		dynamicRenderDistance = max(Game_ViewDistance, CHUNK_SIZE);
+	}
+	renderDistSquared = dynamicRenderDistance * dynamicRenderDistance;
+	buildDistSquared  = buildDist  * buildDist;
+	unloadDistSquared = unloadDist * unloadDist;
+#else
 	buildDistSquared  = AdjustDist(Game_UserViewDistance);
 	renderDistSquared = AdjustDist(Game_ViewDistance);
+#endif
+}
+
+static cc_bool ChunkPastUnloadDistance(const struct ChunkInfo* chunk, int sortedDistSqr) {
+#ifdef CC_BUILD_ESP32S3
+	return ChunkHorizontalCentreDistSquared(chunk) >= unloadDistSquared;
+#else
+	(void)chunk;
+	return sortedDistSqr >= buildDistSquared + 32 * 16;
+#endif
+}
+
+static cc_bool ChunkWithinBuildDistance(const struct ChunkInfo* chunk, int sortedDistSqr) {
+#ifdef CC_BUILD_ESP32S3
+	return ChunkHorizontalCentreDistSquared(chunk) <= buildDistSquared;
+#else
+	(void)chunk;
+	return sortedDistSqr <= buildDistSquared;
+#endif
+}
+
+static cc_bool ChunkWithinRenderDistance(const struct ChunkInfo* chunk, int sortedDistSqr) {
+#ifdef CC_BUILD_ESP32S3
+	return ChunkAabbDistSquared(chunk) <= renderDistSquared;
+#else
+	(void)chunk;
+	return sortedDistSqr <= renderDistSquared;
+#endif
 }
 
 static int UpdateChunksAndVisibility(int* chunkUpdates, cc_bool* pendingBuilds) {
-	int renderDistSqr = renderDistSquared;
-	int buildDistSqr  = buildDistSquared;
-
 	struct ChunkInfo* chunk;
 	int i, j = 0, distSqr, res;
 
@@ -767,13 +842,13 @@ static int UpdateChunksAndVisibility(int* chunkUpdates, cc_bool* pendingBuilds) 
 		chunk = sortedChunks[i];
 		if (chunk->empty) continue;
 		distSqr = distances[i];
-		
+
 		/* Auto unload chunks far away chunks */
-		if (!chunk->noData && distSqr >= buildDistSqr + 32 * 16) {
+		if (!chunk->noData && ChunkPastUnloadDistance(chunk, distSqr)) {
 			DeleteChunk(chunk); continue;
 		}
 
-		if (chunk->dirty && distSqr <= buildDistSqr) {
+		if (chunk->dirty && ChunkWithinBuildDistance(chunk, distSqr)) {
 			if (*chunkUpdates < chunksTarget) {
 				DeleteChunk(chunk);
 				BuildChunk(chunk, chunkUpdates);
@@ -781,8 +856,8 @@ static int UpdateChunksAndVisibility(int* chunkUpdates, cc_bool* pendingBuilds) 
 			if (chunk->dirty && !chunk->buildFailed) *pendingBuilds = true;
 		}
 
-		if (distSqr > renderDistSqr) {
-			chunk->visible  = false;
+		if (!ChunkWithinRenderDistance(chunk, distSqr)) {
+			chunk->visible = false;
 		} else {
 			res = Frustum_TestAABB(chunk->centreX, chunk->centreY, chunk->centreZ, 8, 8, 8);
 			chunk->visible  = res != FRUSTUM_OUTSIDE;
@@ -799,9 +874,6 @@ static int UpdateChunksAndVisibility(int* chunkUpdates, cc_bool* pendingBuilds) 
 }
 
 static int UpdateChunksStill(int* chunkUpdates, cc_bool* pendingBuilds) {
-	int renderDistSqr = renderDistSquared;
-	int buildDistSqr  = buildDistSquared;
-
 	struct ChunkInfo* chunk;
 	int i, j = 0, distSqr, res;
 
@@ -812,11 +884,11 @@ static int UpdateChunksStill(int* chunkUpdates, cc_bool* pendingBuilds) {
 		distSqr = distances[i];
 
 		/* Auto unload chunks far away chunks */
-		if (!chunk->noData && distSqr >= buildDistSqr + 32 * 16) {
+		if (!chunk->noData && ChunkPastUnloadDistance(chunk, distSqr)) {
 			DeleteChunk(chunk); continue;
 		}
 
-		if (chunk->dirty && distSqr <= buildDistSqr && !chunk->buildFailed) {
+		if (chunk->dirty && ChunkWithinBuildDistance(chunk, distSqr) && !chunk->buildFailed) {
 			if (*chunkUpdates < chunksTarget) {
 				DeleteChunk(chunk);
 				BuildChunk(chunk, chunkUpdates);
@@ -824,7 +896,7 @@ static int UpdateChunksStill(int* chunkUpdates, cc_bool* pendingBuilds) {
 			if (chunk->dirty && !chunk->buildFailed) *pendingBuilds = true;
 
 			/* only need to update the visibility of chunks in range. */
-			if (distSqr > renderDistSqr) {
+			if (!ChunkWithinRenderDistance(chunk, distSqr)) {
 				chunk->visible  = false;
 			} else {
 				res = Frustum_TestAABB(chunk->centreX, chunk->centreY, chunk->centreZ, 8, 8, 8);
@@ -844,6 +916,78 @@ static int UpdateChunksStill(int* chunkUpdates, cc_bool* pendingBuilds) {
 	return j;
 }
 
+#ifdef CC_BUILD_ESP32S3
+static void UpdateMapPerfState(void) {
+	cc_uint32 resident = 0, pending = 0, failed = 0, meshVertices = 0;
+	int i;
+	for (i = 0; i < chunksCount; i++) {
+		const struct ChunkInfo* chunk = &mapChunks[i];
+		if (!chunk->noData) resident++;
+		if (chunk->dirty && ChunkWithinBuildDistance(chunk, 0)) pending++;
+		if (chunk->buildFailed) failed++;
+#ifdef CC_BUILD_SOFTFP_QUAD_FRUSTUM_CULL
+		meshVertices += chunk->meshVertices;
+#endif
+	}
+	holo_perf_set_map_state((cc_uint32)Game_ViewDistance,
+		(cc_uint32)dynamicRenderDistance,
+		(cc_uint32)renderChunksCount, resident, pending, failed, meshVertices);
+}
+
+static void UpdateDynamicRenderDistance(float delta, int chunkUpdates) {
+	int oldDistance = dynamicRenderDistance;
+	/* A larger user setting is a maximum, not permission to shrink below the
+	 * already validated 20-block baseline. This lets open views reach 36 while
+	 * geometrically expensive views preserve approximately 20 FPS at radius 20. */
+	int minDistance = min(Game_ViewDistance, 20);
+	int maxDistance = max(Game_ViewDistance, CHUNK_SIZE);
+	int logValues[2];
+
+	/* The ESP32-S3 performance target is defined at a real, fixed 20-block
+	 * radius. Do not silently meet it by reducing the visible radius to 16.
+	 * Larger user settings retain the adaptive controller. */
+	if (Game_ViewDistance <= 20) {
+		dynamicRenderDistance = Game_ViewDistance;
+		renderDistSquared = dynamicRenderDistance * dynamicRenderDistance;
+		dynamicFrameEma = 0.0f;
+		dynamicSlowFrames = dynamicFastFrames = 0;
+		return;
+	}
+
+	/* Chunk build spikes are transient and already rate limited. Base the view
+	 * controller only on completed render-heavy frames. Ignore pauses/stalls. */
+	if (chunkUpdates || chunksNeedScan || delta <= 0.0f || delta > 0.20f) return;
+	if (dynamicFrameEma <= 0.0f) dynamicFrameEma = delta;
+	else dynamicFrameEma += (delta - dynamicFrameEma) * 0.125f;
+
+	if (dynamicFrameEma > 0.052f && dynamicRenderDistance > minDistance) {
+		dynamicFastFrames = 0;
+		if (++dynamicSlowFrames >= 8) {
+			dynamicRenderDistance = max(minDistance, dynamicRenderDistance - 2);
+			dynamicSlowFrames = 0;
+		}
+	} else if (dynamicFrameEma < 0.044f && dynamicRenderDistance < maxDistance) {
+		dynamicSlowFrames = 0;
+		if (++dynamicFastFrames >= 45) {
+			dynamicRenderDistance++;
+			dynamicFastFrames = 0;
+		}
+	} else {
+		dynamicSlowFrames = dynamicFastFrames = 0;
+	}
+	if (dynamicRenderDistance == oldDistance) return;
+
+	renderDistSquared = dynamicRenderDistance * dynamicRenderDistance;
+	/* Force the full visibility path next frame; a stationary-build scan only
+	 * updates dirty chunks and cannot apply a new radius to every cached mesh. */
+	lastCamPos = Vec3_BigPos();
+	chunksNeedScan = true;
+	logValues[0] = Game_ViewDistance;
+	logValues[1] = dynamicRenderDistance;
+	Platform_Log2("[cc.view] max=%i effective=%i", &logValues[0], &logValues[1]);
+}
+#endif
+
 static void UpdateChunks(float delta) {
 	struct LocalPlayer* p;
 	cc_bool samePos;
@@ -856,18 +1000,31 @@ static void UpdateChunks(float delta) {
 	p = Entities.CurPlayer;
 	samePos = Vec3_Equals(&Camera.CurrentPos, &lastCamPos)
 		&& p->Base.Pitch == lastPitch && p->Base.Yaw == lastYaw;
-	if (samePos && !chunksNeedScan) return;
+	if (samePos && !chunksNeedScan) {
+#ifdef CC_BUILD_ESP32S3
+		/* Keep sampling after input stops. A costly view reached by rotating once
+		 * must still be able to shrink its effective radius while held still. */
+		UpdateDynamicRenderDistance(delta, 0);
+#endif
+		return;
+	}
 
 	renderChunksCount = samePos ?
 		UpdateChunksStill(&chunkUpdates, &pendingBuilds) :
 		UpdateChunksAndVisibility(&chunkUpdates, &pendingBuilds);
 	chunksNeedScan = pendingBuilds;
+#ifdef CC_BUILD_ESP32S3
+	UpdateMapPerfState();
+#endif
 
 	lastCamPos = Camera.CurrentPos;
 	lastPitch  = p->Base.Pitch;
 	lastYaw    = p->Base.Yaw;
 
 	if (!samePos || chunkUpdates) ResetPartFlags();
+#ifdef CC_BUILD_ESP32S3
+	UpdateDynamicRenderDistance(delta, chunkUpdates);
+#endif
 }
 
 static void SortMapChunks(int left, int right) {

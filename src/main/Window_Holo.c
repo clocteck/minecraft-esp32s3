@@ -35,11 +35,7 @@ struct cc_window WindowInfo;
 struct cc_window Window_Alt;
 static cc_bool s_close_raised;
 static const module_host_api_v2 *s_window_host;
-#ifdef CC_BUILD_SOFTFP_FB16
 typedef uint16_t HoloFramebufferPixel;
-#else
-typedef BitmapCol HoloFramebufferPixel;
-#endif
 static HoloFramebufferPixel *s_framebuffers[2];
 static unsigned s_render_buffer;
 static uint8_t s_core1_yield_count;
@@ -51,113 +47,10 @@ static volatile uint8_t s_present_stop;
 static volatile uint8_t s_present_stats_ready;
 static uint64_t s_present_convert_us;
 static uint64_t s_present_dma_us;
-static uint64_t s_present_clear_us;
 static uint32_t s_present_dma_submits;
-static uint16_t s_precleared_color[2];
-static uint8_t s_precleared_valid[2];
-static volatile uint8_t s_pending_color_clear;
-static uint16_t s_pending_color;
-static uint32_t * volatile s_pending_depth_clear;
-static size_t s_pending_depth_words;
-static uint32_t s_pending_depth_value;
-static uint8_t s_present_color_clear;
-static uint16_t s_present_color;
-static uint32_t *s_present_depth_clear;
-static size_t s_present_depth_words;
-static uint32_t s_present_depth_value;
 
 static cc_bool PresentFramebuffer(HoloFramebufferPixel *pixels, uint64_t *convert_us,
                                   uint64_t *dma_us, uint32_t *dma_submits);
-
-static void Fill16(uint16_t *dst, size_t count, uint16_t value)
-{
-    size_t i = 0;
-    for (; i + 8 <= count; i += 8) {
-        dst[i + 0] = value; dst[i + 1] = value;
-        dst[i + 2] = value; dst[i + 3] = value;
-        dst[i + 4] = value; dst[i + 5] = value;
-        dst[i + 6] = value; dst[i + 7] = value;
-    }
-    for (; i < count; i++) dst[i] = value;
-}
-
-static void Fill32(uint32_t *dst, size_t count, uint32_t value)
-{
-    size_t i = 0;
-    for (; i + 8 <= count; i += 8) {
-        dst[i + 0] = value; dst[i + 1] = value;
-        dst[i + 2] = value; dst[i + 3] = value;
-        dst[i + 4] = value; dst[i + 5] = value;
-        dst[i + 6] = value; dst[i + 7] = value;
-    }
-    for (; i < count; i++) dst[i] = value;
-}
-
-static void ConsumePendingClears(void)
-{
-    s_present_color_clear = s_pending_color_clear;
-    s_present_color = s_pending_color;
-    s_present_depth_clear = s_pending_depth_clear;
-    s_present_depth_words = s_pending_depth_words;
-    s_present_depth_value = s_pending_depth_value;
-    s_pending_color_clear = 0;
-    s_pending_depth_clear = NULL;
-    s_pending_depth_words = 0;
-}
-
-static uint64_t ClearPresentedBuffers(HoloFramebufferPixel *pixels)
-{
-    uint64_t started = holo_perf_now_us();
-    unsigned i;
-    if (s_present_color_clear && pixels) {
-        Fill16((uint16_t *)pixels,
-               CLASSICUBE_RENDER_WIDTH * CLASSICUBE_RENDER_HEIGHT,
-               s_present_color);
-        for (i = 0; i < 2; i++) {
-            if (pixels != s_framebuffers[i]) continue;
-            s_precleared_color[i] = s_present_color;
-            s_precleared_valid[i] = 1;
-            break;
-        }
-    }
-    if (s_present_depth_clear && s_present_depth_words) {
-        Fill32(s_present_depth_clear, s_present_depth_words,
-               s_present_depth_value);
-    }
-    s_present_color_clear = 0;
-    s_present_depth_clear = NULL;
-    s_present_depth_words = 0;
-    return holo_perf_now_us() - started;
-}
-
-bool holo_port_presenter_async_available(void)
-{
-    return s_present_task != NULL;
-}
-
-bool holo_port_presenter_take_precleared_color(const void *pixels, uint16_t color)
-{
-    unsigned i;
-    if (!s_present_task || !pixels) return false;
-    for (i = 0; i < 2; i++) {
-        bool match;
-        if (pixels != s_framebuffers[i]) continue;
-        match = s_precleared_valid[i] && s_precleared_color[i] == color;
-        s_precleared_valid[i] = 0;
-        return match;
-    }
-    return false;
-}
-
-void holo_port_presenter_schedule_clears(uint16_t color, uint32_t *depth,
-                                         size_t depth_words, uint32_t depth_value)
-{
-    s_pending_color = color;
-    s_pending_color_clear = 1;
-    s_pending_depth_clear = depth;
-    s_pending_depth_words = depth_words;
-    s_pending_depth_value = depth_value;
-}
 
 static void PresentWorker(void *arg)
 {
@@ -172,7 +65,6 @@ static void PresentWorker(void *arg)
         if (s_present_stop) break;
         pixels = s_present_pixels;
         (void)PresentFramebuffer(pixels, &convert_us, &dma_us, &dma_submits);
-        s_present_clear_us = ClearPresentedBuffers(pixels);
         s_present_convert_us = convert_us;
         s_present_dma_us = dma_us;
         s_present_dma_submits = dma_submits;
@@ -206,14 +98,6 @@ static cc_bool StartPresentWorker(void)
     s_present_stop = 0;
     s_present_stats_ready = 0;
     s_present_pixels = NULL;
-    s_present_clear_us = 0;
-    s_pending_color_clear = 0;
-    s_pending_depth_clear = NULL;
-    s_pending_depth_words = 0;
-    s_present_color_clear = 0;
-    s_present_depth_clear = NULL;
-    s_present_depth_words = 0;
-    memset(s_precleared_valid, 0, sizeof(s_precleared_valid));
     if (host->task.create_ex) {
         result = host->task.create_ex("cc_present", PresentWorker, NULL,
                                      PRESENT_STACK_BYTES, 3u, 0,
@@ -253,13 +137,6 @@ static void Window_HoloShutdownPresent(void)
     s_present_pixels = NULL;
     s_present_stop = 0;
     s_present_stats_ready = 0;
-    s_pending_color_clear = 0;
-    s_pending_depth_clear = NULL;
-    s_pending_depth_words = 0;
-    s_present_color_clear = 0;
-    s_present_depth_clear = NULL;
-    s_present_depth_words = 0;
-    memset(s_precleared_valid, 0, sizeof(s_precleared_valid));
 }
 
 void Window_PreInit(void) { }
@@ -371,7 +248,6 @@ void Window_AllocFramebuffer(struct Bitmap *bmp, int width, int height)
     bmp->width = CLASSICUBE_RENDER_WIDTH;
     bmp->height = CLASSICUBE_RENDER_HEIGHT;
     s_render_buffer = 0;
-    memset(s_precleared_valid, 0, sizeof(s_precleared_valid));
     s_framebuffers[0] = (HoloFramebufferPixel *)Mem_Alloc(
         bmp->width, bmp->height * sizeof(HoloFramebufferPixel), "320x240 framebuffer A");
     s_framebuffers[1] = (HoloFramebufferPixel *)Mem_Alloc(
@@ -382,13 +258,6 @@ void Window_AllocFramebuffer(struct Bitmap *bmp, int width, int height)
         s_framebuffers[1] = NULL;
         holo_port_log("[cc.present] async presenter unavailable; using synchronous output");
     }
-}
-
-static uint16_t to_rgb565(BitmapCol color)
-{
-    return (uint16_t)(((color >> 8) & 0xF800u) |
-                      ((color >> 5) & 0x07E0u) |
-                      ((color >> 3) & 0x001Fu));
 }
 
 static cc_bool PresentFramebuffer(HoloFramebufferPixel *pixels, uint64_t *convert_us,
@@ -422,22 +291,9 @@ static cc_bool PresentFramebuffer(HoloFramebufferPixel *pixels, uint64_t *conver
     for (y = 0; y < CLASSICUBE_RENDER_HEIGHT; y += 16) {
         uint16_t *block = dma[(y / 16) & 1];
         int rows = min(16, CLASSICUBE_RENDER_HEIGHT - y);
-        int yy, x;
         started = holo_perf_now_us();
-#ifdef CC_BUILD_SOFTFP_FB16
         memcpy(block, pixels + y * CLASSICUBE_RENDER_WIDTH,
                (size_t)rows * CLASSICUBE_DISPLAY_WIDTH * sizeof(uint16_t));
-#else
-        for (yy = 0; yy < rows; yy++) {
-            BitmapCol *src = pixels + (y + yy) * CLASSICUBE_RENDER_WIDTH;
-            uint32_t *dst = (uint32_t *)(block + yy * CLASSICUBE_DISPLAY_WIDTH);
-            for (x = 0; x < CLASSICUBE_RENDER_WIDTH; x += 2) {
-                uint32_t lo = to_rgb565(src[x]);
-                uint32_t hi = to_rgb565(src[x + 1]);
-                dst[x >> 1] = lo | (hi << 16);
-            }
-        }
-#endif
         convert_total += holo_perf_now_us() - started;
         started = holo_perf_now_us();
         if (host->display.pushImageDMA(surface, 0, (int16_t)y, CLASSICUBE_DISPLAY_WIDTH,
@@ -463,21 +319,19 @@ static cc_bool PresentFramebuffer(HoloFramebufferPixel *pixels, uint64_t *conver
 }
 
 static void RecordPresentStats(uint64_t convert_us, uint64_t dma_us,
-                               uint64_t clear_us, uint32_t dma_submits)
+                               uint32_t dma_submits)
 {
     holo_perf_add(HOLO_PERF_CONVERT, convert_us);
     holo_perf_add(HOLO_PERF_DMA, dma_us);
-    holo_perf_add(HOLO_PERF_ASYNC_CLEAR, clear_us);
     while (dma_submits--) holo_perf_count_dma_submit();
 }
 
 void Window_DrawFramebuffer(Rect2D r, struct Bitmap *bmp)
 {
     const module_host_api_v2 *host = s_window_host;
-    uint64_t convert_us = 0, dma_us = 0, clear_us = 0;
+    uint64_t convert_us = 0, dma_us = 0;
     uint64_t wait_started;
     uint32_t dma_submits = 0;
-    cc_bool clears_prepared = false;
     (void)r;
     if (!bmp || !bmp->scan0) return;
 
@@ -491,11 +345,9 @@ void Window_DrawFramebuffer(Rect2D r, struct Bitmap *bmp)
         holo_perf_add(HOLO_PERF_ASYNC_WAIT, holo_perf_now_us() - wait_started);
         if (s_present_stats_ready) {
             RecordPresentStats(s_present_convert_us, s_present_dma_us,
-                               s_present_clear_us, s_present_dma_submits);
+                               s_present_dma_submits);
             s_present_stats_ready = 0;
         }
-        ConsumePendingClears();
-        clears_prepared = true;
         s_present_pixels = presented;
         if (host->sync.give(s_present_ready) == MODULE_OK) {
             s_render_buffer = next_buffer;
@@ -512,11 +364,9 @@ void Window_DrawFramebuffer(Rect2D r, struct Bitmap *bmp)
         (void)host->sync.give(s_present_done);
     }
 
-    if (!clears_prepared) ConsumePendingClears();
     (void)PresentFramebuffer((HoloFramebufferPixel*)bmp->scan0,
                              &convert_us, &dma_us, &dma_submits);
-    clear_us = ClearPresentedBuffers((HoloFramebufferPixel*)bmp->scan0);
-    RecordPresentStats(convert_us, dma_us, clear_us, dma_submits);
+    RecordPresentStats(convert_us, dma_us, dma_submits);
 }
 
 void Window_FreeFramebuffer(struct Bitmap *bmp)

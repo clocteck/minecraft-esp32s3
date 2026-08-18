@@ -8,6 +8,7 @@
 #define COLOR_BAND_BYTES (CLASSICUBE_3D_WIDTH * CLASSICUBE_COLOR_BAND_ROWS * sizeof(uint16_t))
 #define SMALL_COLOR_BAND_BYTES (CLASSICUBE_3D_WIDTH * CLASSICUBE_COLOR_SMALL_BAND_ROWS * sizeof(uint16_t))
 #define DEPTH_LUT_BYTES (2u * 1024u)
+#define TERRAIN_CACHE_BYTES (16u * 1024u)
 #define PORT_BUFFERS 9u
 #define HOT_VB_ARENA_BYTES (12u * 1024u)
 
@@ -151,6 +152,8 @@ void *holo_port_buffer(size_t bytes, unsigned index)
     if (index >= PORT_BUFFERS || !s_host || !s_host->heap.malloc) return NULL;
     if (index == 2) {
         capacity = RENDER_CACHE_BYTES;
+    } else if (index == 3) {
+        capacity = TERRAIN_CACHE_BYTES;
     } else if (index == 4 || index == 5) {
         capacity = COLOR_BAND_BYTES;
     } else if (index == 6 || index == 7) {
