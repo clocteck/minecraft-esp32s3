@@ -163,7 +163,7 @@ static cc_uint32 raster_to_color_rowh[CLASSICUBE_3D_HEIGHT];
 #if defined CC_BUILD_ESP32S3 && defined CC_BUILD_SOFTFP_FB16
 #define SOFTFP_LOWRES_COLOR_STAGE
 static SoftPixel* rasterColorBuffer;
-static SoftPixel* rasterColorInternal[4];
+static SoftPixel* rasterColorInternal[2];
 static SoftPixel* rasterColorRowsFallback[CLASSICUBE_3D_HEIGHT];
 static SoftPixel** rasterColorRows = rasterColorRowsFallback;
 #endif
@@ -470,7 +470,7 @@ void Gfx_Create(void) {
     if (!holo_port_buffer(raster_width * raster_height * sizeof(DepthValue), 2)) {
         Platform_LogConst("[cc.gfx] WARN: 192x144 Z8 internal reserve unavailable; using PSRAM at same resolution");
     }
-    (void)holo_port_buffer(SOFTFP_W_DEPTH8_LUT_SIZE * sizeof(DepthValue), 8);
+    (void)holo_port_buffer(SOFTFP_W_DEPTH8_LUT_SIZE * sizeof(DepthValue), 6);
 #endif
 #ifdef CC_BUILD_SOFTFP_TERRAIN_TILE_CACHE
     {
@@ -517,8 +517,9 @@ void Gfx_Create(void) {
     }
 #endif
 #ifdef SOFTFP_LOWRES_COLOR_STAGE
-    /* DMA is reserved first. Two internal RGB565 bands then cover the lower
-     * 96 rows; colder dynamic-VB allocations fall back to PSRAM instead. */
+    /* Two internal RGB565 bands cover the lower 96 rows. The top 48 rows use
+     * the existing PSRAM staging buffer, preserving about 9 KiB of internal
+     * headroom compared with the former pair of 12-row top bands. */
     rasterColorInternal[0] = (SoftPixel*)holo_port_buffer(
         CLASSICUBE_3D_WIDTH * CLASSICUBE_COLOR_BAND_ROWS * sizeof(SoftPixel), 4);
     rasterColorInternal[1] = (SoftPixel*)holo_port_buffer(
@@ -5792,16 +5793,12 @@ void Gfx_OnWindowResize(int width, int height) {
     colorBuffer = (SoftPixel*)fb_bmp.scan0;
     cb_stride   = fb_bmp.width;
 #ifdef SOFTFP_LOWRES_COLOR_STAGE
-    rasterColorInternal[2] = (SoftPixel*)holo_port_buffer(
-        CLASSICUBE_3D_WIDTH * CLASSICUBE_COLOR_SMALL_BAND_ROWS * sizeof(SoftPixel), 6);
-    rasterColorInternal[3] = (SoftPixel*)holo_port_buffer(
-        CLASSICUBE_3D_WIDTH * CLASSICUBE_COLOR_SMALL_BAND_ROWS * sizeof(SoftPixel), 7);
 #ifdef CC_BUILD_SOFTFP_CORE0_RASTER
     (void)SoftFP_RasterWorkerStart();
 #endif
 #ifdef CC_BUILD_SOFTFP_W_DEPTH8
     wDepth8EncodeLut = (DepthValue*)holo_port_buffer(
-        SOFTFP_W_DEPTH8_LUT_SIZE * sizeof(DepthValue), 8);
+        SOFTFP_W_DEPTH8_LUT_SIZE * sizeof(DepthValue), 6);
     if (wDepth8EncodeLut) {
         cc_uint32 lutIndex;
         for (lutIndex = 0; lutIndex < SOFTFP_W_DEPTH8_LUT_SIZE; lutIndex++) {
@@ -5817,13 +5814,7 @@ void Gfx_OnWindowResize(int width, int height) {
     {
         int row;
         for (row = 0; row < raster_height; row++) {
-            if (row < CLASSICUBE_COLOR_SMALL_BAND_ROWS && rasterColorInternal[2]) {
-                rasterColorRows[row] = rasterColorInternal[2] + row * raster_width;
-            } else if (row < CLASSICUBE_COLOR_SMALL_BAND_ROWS * 2 &&
-                       rasterColorInternal[3]) {
-                rasterColorRows[row] = rasterColorInternal[3] +
-                    (row - CLASSICUBE_COLOR_SMALL_BAND_ROWS) * raster_width;
-            } else if (row >= CLASSICUBE_COLOR_BAND_ROWS &&
+            if (row >= CLASSICUBE_COLOR_BAND_ROWS &&
                 row < CLASSICUBE_COLOR_BAND_ROWS * 2 && rasterColorInternal[0]) {
                 rasterColorRows[row] = rasterColorInternal[0] +
                     (row - CLASSICUBE_COLOR_BAND_ROWS) * raster_width;
@@ -5835,10 +5826,7 @@ void Gfx_OnWindowResize(int width, int height) {
                 rasterColorRows[row] = rasterColorBuffer + row * raster_width;
             }
         }
-        if (rasterColorInternal[0] && rasterColorInternal[1] &&
-            rasterColorInternal[2] && rasterColorInternal[3]) {
-            Platform_LogConst("[cc.gfx] color-hot=lower96+top24 rows RGB565 internal=46080");
-        } else if (rasterColorInternal[0] && rasterColorInternal[1]) {
+        if (rasterColorInternal[0] && rasterColorInternal[1]) {
             Platform_LogConst("[cc.gfx] color-hot=lower96 rows RGB565 internal=36864");
         } else if (rasterColorInternal[0] || rasterColorInternal[1]) {
             Platform_LogConst("[cc.gfx] color-hot=48 rows RGB565 internal=18432");

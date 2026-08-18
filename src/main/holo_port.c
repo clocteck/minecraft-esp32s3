@@ -6,10 +6,9 @@
 #define DMA_BYTES (CLASSICUBE_DISPLAY_WIDTH * DMA_ROWS * sizeof(uint16_t))
 #define RENDER_CACHE_BYTES (CLASSICUBE_3D_WIDTH * CLASSICUBE_3D_HEIGHT)
 #define COLOR_BAND_BYTES (CLASSICUBE_3D_WIDTH * CLASSICUBE_COLOR_BAND_ROWS * sizeof(uint16_t))
-#define SMALL_COLOR_BAND_BYTES (CLASSICUBE_3D_WIDTH * CLASSICUBE_COLOR_SMALL_BAND_ROWS * sizeof(uint16_t))
 #define DEPTH_LUT_BYTES (2u * 1024u)
 #define TERRAIN_CACHE_BYTES (16u * 1024u)
-#define PORT_BUFFERS 9u
+#define PORT_BUFFERS 7u
 #define HOT_VB_ARENA_BYTES (12u * 1024u)
 
 typedef struct HotVbBlock {
@@ -156,9 +155,7 @@ void *holo_port_buffer(size_t bytes, unsigned index)
         capacity = TERRAIN_CACHE_BYTES;
     } else if (index == 4 || index == 5) {
         capacity = COLOR_BAND_BYTES;
-    } else if (index == 6 || index == 7) {
-        capacity = SMALL_COLOR_BAND_BYTES;
-    } else if (index == 8) {
+    } else if (index == 6) {
         capacity = DEPTH_LUT_BYTES;
     } else {
         capacity = DMA_BYTES;
@@ -177,9 +174,7 @@ void *holo_port_buffer(size_t bytes, unsigned index)
             holo_port_set_last_error("cannot allocate internal terrain texture cache");
         } else if (index == 4 || index == 5) {
             holo_port_set_last_error("cannot allocate internal 3D colour band");
-        } else if (index == 6 || index == 7) {
-            holo_port_set_last_error("cannot allocate internal small 3D colour band");
-        } else if (index == 8) {
+        } else if (index == 6) {
             holo_port_set_last_error("cannot allocate internal Z8 encode table");
         } else {
             holo_port_set_last_error("cannot allocate 10 KiB internal DMA buffer");

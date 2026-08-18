@@ -42,9 +42,10 @@ Distance fog is disabled: the ordered low-cost variant was visibly granular at
 192x144, while smooth per-pixel fog consumed too much of the full-frame budget.
 The packaged texture set is the complete ClassiCube resource archive with a
 256x256 terrain atlas; the earlier N64-only 256x128 atlas omitted upper rows.
-Two 48-row and two 12-row RGB565 colour bands keep 120 of 144 raster rows
-(46,080 bytes) in internal RAM; the dynamic-VB arena is 12 KiB, with its colder
-tail falling back to PSRAM so the mandatory DMA buffers retain priority.
+Two 48-row RGB565 colour bands keep the lower 96 of 144 raster rows (36,864
+bytes) in internal RAM. The top 48 rows use the PSRAM staging buffer, saving
+9,216 bytes of internal RAM; the dynamic-VB arena remains 12 KiB, with its
+colder tail falling back to PSRAM so the mandatory DMA buffers retain priority.
 
 The user view distance is a maximum of 36 blocks. The renderer keeps voxel data,
 resident meshes, and visible meshes on separate distance budgets: one extra
