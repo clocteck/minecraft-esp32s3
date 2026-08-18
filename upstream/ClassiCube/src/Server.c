@@ -117,11 +117,39 @@ static void Ping_Reset(void) {
 static char autoloadBuffer[FILENAME_SIZE];
 cc_string SP_AutoloadMap = String_FromArray(autoloadBuffer);
 
+#ifdef CC_BUILD_ESP32S3
+#define ESP32S3_WDEV_RND_REG 0x6003507CUL
+
+static CC_INLINE cc_uint32 SPConnection_ReadCycleCount(void) {
+	cc_uint32 cycles;
+	__asm__ __volatile__("rsr.ccount %0" : "=a"(cycles));
+	return cycles;
+}
+
+/* WiFi remains active while the app runs, so ESP32-S3's WDEV RNG is fed by
+ * the hardware entropy source. Sample it for longer than Espressif's minimum
+ * interval, then mix in the independent microsecond timer. */
+static int SPConnection_HardwareSeed(void) {
+	volatile const cc_uint32* rng = (volatile const cc_uint32*)ESP32S3_WDEV_RND_REG;
+	cc_uint32 start = SPConnection_ReadCycleCount();
+	cc_uint32 now, value = 0;
+	do {
+		value ^= *rng;
+		now = SPConnection_ReadCycleCount();
+	} while ((cc_uint32)(now - start) < 6000u);
+	value ^= *rng;
+	value ^= (cc_uint32)Stopwatch_Measure();
+	return (int)(value & Int32_MaxValue);
+}
+#endif
+
 static void SPConnection_BeginConnect(void) {
 	static const cc_string logName = String_FromConst("Singleplayer");
 	const struct MapGenerator* gen;
 	int seed, horSize, verSize;
+#ifndef CC_BUILD_ESP32S3
 	RNGState rnd;
+#endif
 
 	Chat_SetLogName(&logName);
 	Game_UseCPEBlocks = Game_Version.HasCPE;
@@ -133,7 +161,7 @@ static void SPConnection_BeginConnect(void) {
 
 	#if defined CC_BUILD_ESP32S3
 	/* Keep a larger playable map while limiting vertical generation and mesh cost. */
-	horSize = 128;
+	horSize = 160;
 	verSize = 40;
 	#elif defined CC_BUILD_NDS || defined CC_BUILD_PS1 || defined CC_BUILD_SATURN || defined CC_BUILD_MACCLASSIC || defined CC_BUILD_TINYMEM
 	horSize = 16;
@@ -153,13 +181,8 @@ static void SPConnection_BeginConnect(void) {
 #endif
 
 #ifdef CC_BUILD_ESP32S3
-	/* Optional deterministic startup map for on-device renderer A/B tests.
-	 * A negative value keeps normal random-world behaviour. */
-	seed = Options_GetInt("esp-fixed-seed", -1, Int32_MaxValue, -1);
-	if (seed < 0) {
-		Random_SeedFromCurrentTime(&rnd);
-		seed = Random_Next(&rnd, Int32_MaxValue);
-	}
+	seed = SPConnection_HardwareSeed();
+	Platform_Log1("[cc.world] hardware seed=%i", &seed);
 #else
 	Random_SeedFromCurrentTime(&rnd);
 	seed = Random_Next(&rnd, Int32_MaxValue);

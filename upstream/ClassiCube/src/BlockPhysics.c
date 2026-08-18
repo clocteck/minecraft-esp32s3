@@ -92,11 +92,104 @@ static RNGState physics_rnd;
 static int physics_tickCount;
 static int physics_maxWaterX, physics_maxWaterY, physics_maxWaterZ;
 static struct TickQueue lavaQ, waterQ;
-static cc_uint8* lavaLevels;
 
 #define LAVA_LEVEL_SOURCE 0
 #define LAVA_LEVEL_MAX    4
-#define LAVA_LEVEL_NONE   0xFF
+#define LAVA_LEVEL_NONE   0x0F
+
+/* Flow levels are sparse. Split the world into 8x8x8 pages and only allocate
+ * the 4-bit level array for pages containing active, flowing lava. Still lava
+ * is a source by definition, so it needs no separate level entry at all. */
+#define LAVA_PAGE_SHIFT  3
+#define LAVA_PAGE_MASK   7
+#define LAVA_PAGE_BYTES  256
+
+struct LavaLevelPage {
+	cc_uint16 used;
+	cc_uint8 levels[LAVA_PAGE_BYTES];
+};
+
+static struct LavaLevelPage** lavaLevelPages;
+static int lavaPagesX, lavaPagesZ;
+static int lavaPageSlots, lavaPagesUsed;
+
+static void Physics_FreeLavaLevels(void) {
+	int i;
+	if (lavaLevelPages) {
+		for (i = 0; i < lavaPageSlots; i++) Mem_Free(lavaLevelPages[i]);
+	}
+	Mem_Free(lavaLevelPages);
+	lavaLevelPages = NULL;
+	lavaPagesX = lavaPagesZ = 0;
+	lavaPageSlots = lavaPagesUsed = 0;
+}
+
+static CC_INLINE int Physics_GetLavaPageIndex(int index, int* localIndex) {
+	int yz = index / World.Width;
+	int x  = index - yz * World.Width;
+	int y  = yz / World.Length;
+	int z  = yz - y * World.Length;
+
+	*localIndex = ((y & LAVA_PAGE_MASK) << 6)
+		| ((z & LAVA_PAGE_MASK) << 3) | (x & LAVA_PAGE_MASK);
+	return (((y >> LAVA_PAGE_SHIFT) * lavaPagesZ + (z >> LAVA_PAGE_SHIFT))
+		* lavaPagesX) + (x >> LAVA_PAGE_SHIFT);
+}
+
+static CC_INLINE cc_uint8 Physics_GetPageLevel(const struct LavaLevelPage* page, int localIndex) {
+	cc_uint8 pair = page->levels[localIndex >> 1];
+	return (localIndex & 1) ? pair >> 4 : pair & 0x0F;
+}
+
+static CC_INLINE void Physics_SetPageLevel(struct LavaLevelPage* page, int localIndex, cc_uint8 level) {
+	cc_uint8* pair = &page->levels[localIndex >> 1];
+	if (localIndex & 1) {
+		*pair = (cc_uint8)((*pair & 0x0F) | (level << 4));
+	} else {
+		*pair = (cc_uint8)((*pair & 0xF0) | level);
+	}
+}
+
+static CC_INLINE cc_uint8 Physics_GetStoredLavaLevel(int index) {
+	struct LavaLevelPage* page;
+	int pageIndex, localIndex;
+	if (!lavaLevelPages) return LAVA_LEVEL_NONE;
+
+	pageIndex = Physics_GetLavaPageIndex(index, &localIndex);
+	page = lavaLevelPages[pageIndex];
+	return page ? Physics_GetPageLevel(page, localIndex) : LAVA_LEVEL_NONE;
+}
+
+static void Physics_SetLavaLevel(int index, cc_uint8 level) {
+	struct LavaLevelPage* page;
+	cc_uint8 oldLevel;
+	int pageIndex, localIndex;
+	if (!lavaLevelPages) return;
+
+	level &= 0x0F;
+	pageIndex = Physics_GetLavaPageIndex(index, &localIndex);
+	page = lavaLevelPages[pageIndex];
+	if (!page) {
+		if (level == LAVA_LEVEL_NONE) return;
+		page = (struct LavaLevelPage*)Mem_Alloc(1, sizeof(struct LavaLevelPage), "lava level page");
+		page->used = 0;
+		Mem_Set(page->levels, 0xFF, LAVA_PAGE_BYTES);
+		lavaLevelPages[pageIndex] = page;
+		lavaPagesUsed++;
+	}
+
+	oldLevel = Physics_GetPageLevel(page, localIndex);
+	if (oldLevel == level) return;
+	if (oldLevel == LAVA_LEVEL_NONE) page->used++;
+	if (level    == LAVA_LEVEL_NONE) page->used--;
+	Physics_SetPageLevel(page, localIndex, level);
+
+	if (!page->used) {
+		Mem_Free(page);
+		lavaLevelPages[pageIndex] = NULL;
+		lavaPagesUsed--;
+	}
+}
 
 #define PHYSICS_DELAY_MASK 0xF8000000UL
 #define PHYSICS_POS_MASK   0x07FFFFFFUL
@@ -110,27 +203,33 @@ static cc_bool Physics_IsLava(BlockID block) {
 }
 
 static void Physics_OnNewMapLoaded(void* obj) {
-	int i;
+	int i, pagesY, lavaMemory;
 	BlockID block;
 	TickQueue_Clear(&lavaQ);
 	TickQueue_Clear(&waterQ);
-	Mem_Free(lavaLevels);
-	lavaLevels = NULL;
+	Physics_FreeLavaLevels();
 
 	if (World.Blocks && World.Volume) {
-		lavaLevels = (cc_uint8*)Mem_Alloc(World.Volume, 1, "lava flow levels");
-		Mem_Set(lavaLevels, LAVA_LEVEL_NONE, World.Volume);
+		lavaPagesX = (World.Width  + LAVA_PAGE_MASK) >> LAVA_PAGE_SHIFT;
+		pagesY     = (World.Height + LAVA_PAGE_MASK) >> LAVA_PAGE_SHIFT;
+		lavaPagesZ = (World.Length + LAVA_PAGE_MASK) >> LAVA_PAGE_SHIFT;
+		lavaPageSlots = lavaPagesX * pagesY * lavaPagesZ;
+		lavaLevelPages = (struct LavaLevelPage**)Mem_AllocCleared(
+			lavaPageSlots, sizeof(struct LavaLevelPage*), "lava level page table");
 
-		/* Still lava persists sources; active lava is rebuilt from nearby sources. */
+		/* Still lava encodes source level in the block itself. Only active lava
+		 * needs sparse level storage and a pending physics tick. */
 		for (i = 0; i < World.Volume; i++) {
 			block = World_GetRawBlock(i);
-			if (block == BLOCK_STILL_LAVA) {
-				lavaLevels[i] = LAVA_LEVEL_SOURCE;
-			} else if (block == BLOCK_LAVA) {
-				lavaLevels[i] = LAVA_LEVEL_MAX;
+			if (block == BLOCK_LAVA) {
+				Physics_SetLavaLevel(i, LAVA_LEVEL_MAX);
 				TickQueue_Enqueue(&lavaQ, PHYSICS_LAVA_DELAY | i);
 			}
 		}
+		lavaMemory = lavaPageSlots * (int)sizeof(struct LavaLevelPage*)
+			+ lavaPagesUsed * (int)sizeof(struct LavaLevelPage);
+		Platform_Log3("[cc.physics] lava pages=%i/%i bytes=%i",
+			&lavaPagesUsed, &lavaPageSlots, &lavaMemory);
 	}
 
 	physics_maxWaterX = World.MaxX - 2;
@@ -180,9 +279,9 @@ void Physics_OnBlockChanged(int x, int y, int z, BlockID old, BlockID now) {
 		Game_UpdateBlock(x, y, z, BLOCK_STILL_WATER);
 	}
 	index = World_Pack(x, y, z);
-	if (lavaLevels) {
-		lavaLevels[index] = Physics_IsLava(now) ? LAVA_LEVEL_SOURCE : LAVA_LEVEL_NONE;
-	}
+	/* External placements are sources and become still lava below. Any old
+	 * flowing level at this cell must first be removed from sparse storage. */
+	Physics_SetLavaLevel(index, LAVA_LEVEL_NONE);
 
 	/* User can place/delete blocks over ID 256 */
 	if (now == BLOCK_AIR) {
@@ -363,8 +462,8 @@ static void Physics_EnqueueLava(int index, BlockID block) {
 
 static void Physics_PlaceLava(int index, BlockID block) {
 	int x, y, z;
-	if (!lavaLevels) return;
-	lavaLevels[index] = LAVA_LEVEL_SOURCE;
+	if (!lavaLevelPages) return;
+	Physics_SetLavaLevel(index, LAVA_LEVEL_NONE);
 
 	/* Use still lava on the map to preserve source status across save/load. */
 	if (block == BLOCK_LAVA) {
@@ -376,8 +475,12 @@ static void Physics_PlaceLava(int index, BlockID block) {
 }
 
 static cc_uint8 Physics_GetLavaLevel(int index) {
-	if (!lavaLevels || !Physics_IsLava(World_GetRawBlock(index))) return LAVA_LEVEL_NONE;
-	return lavaLevels[index];
+	BlockID block;
+	if (!lavaLevelPages) return LAVA_LEVEL_NONE;
+	block = World_GetRawBlock(index);
+	if (block == BLOCK_STILL_LAVA) return LAVA_LEVEL_SOURCE;
+	if (block != BLOCK_LAVA) return LAVA_LEVEL_NONE;
+	return Physics_GetStoredLavaLevel(index);
 }
 
 static void Physics_PropagateLava(int posIndex, int x, int y, int z, cc_uint8 level) {
@@ -386,16 +489,16 @@ static void Physics_PropagateLava(int posIndex, int x, int y, int z, cc_uint8 le
 
 	/* Lava spreading into water turns the water solid. */
 	if (block == BLOCK_WATER || block == BLOCK_STILL_WATER) {
-		lavaLevels[posIndex] = LAVA_LEVEL_NONE;
+		Physics_SetLavaLevel(posIndex, LAVA_LEVEL_NONE);
 		Game_UpdateBlock(x, y, z, BLOCK_STONE);
 	} else if (Physics_IsLava(block)) {
 		oldLevel = Physics_GetLavaLevel(posIndex);
 		if (oldLevel != LAVA_LEVEL_SOURCE && level < oldLevel) {
-			lavaLevels[posIndex] = level;
+			Physics_SetLavaLevel(posIndex, level);
 			Physics_EnqueueLava(posIndex, block);
 		}
 	} else if (Blocks.Draw[block] == DRAW_GAS) {
-		lavaLevels[posIndex] = level;
+		Physics_SetLavaLevel(posIndex, level);
 		Game_UpdateBlock(x, y, z, BLOCK_LAVA);
 		Physics_EnqueueLava(posIndex, BLOCK_LAVA);
 	}
@@ -442,21 +545,21 @@ static void Physics_ActivateLava(int index, BlockID block) {
 	int x, y, z, belowIndex;
 	BlockID below;
 
-	if (!lavaLevels || !Physics_IsLava(World_GetRawBlock(index))) return;
-	level = lavaLevels[index];
+	if (!lavaLevelPages || !Physics_IsLava(World_GetRawBlock(index))) return;
+	level = Physics_GetLavaLevel(index);
 	if (level > LAVA_LEVEL_MAX) return;
 
 	World_Unpack(index, x, y, z);
 	if (level != LAVA_LEVEL_SOURCE) {
 		supportedLevel = Physics_FindLavaSupport(index, x, y, z);
 		if (supportedLevel == LAVA_LEVEL_NONE) {
-			lavaLevels[index] = LAVA_LEVEL_NONE;
+			Physics_SetLavaLevel(index, LAVA_LEVEL_NONE);
 			Game_UpdateBlock(x, y, z, BLOCK_AIR);
 			Physics_ActivateNeighbours(x, y, z, index);
 			return;
 		}
 		level = supportedLevel;
-		lavaLevels[index] = level;
+		Physics_SetLavaLevel(index, level);
 	}
 
 	if (level >= LAVA_LEVEL_MAX) return;
@@ -484,7 +587,10 @@ static void Physics_TickLava(void) {
 		int index;
 		if (Physics_CheckItem(&lavaQ, &index)) {
 			BlockID block = World_GetRawBlock(index);
-			if (!Physics_IsLava(block)) continue;
+			if (!Physics_IsLava(block)) {
+				Physics_SetLavaLevel(index, LAVA_LEVEL_NONE);
+				continue;
+			}
 			Physics_ActivateLava(index, block);
 		}
 	}
@@ -502,6 +608,7 @@ static void Physics_PropagateWater(int posIndex, int x, int y, int z) {
 	if (block >= BLOCK_WATER && block <= BLOCK_STILL_LAVA) {
 		/* Water spreading into lava turns the lava solid */
 		if (block == BLOCK_LAVA || block == BLOCK_STILL_LAVA) {
+			Physics_SetLavaLevel(posIndex, LAVA_LEVEL_NONE);
 			Game_UpdateBlock(x, y, z, BLOCK_STONE);
 		}
 	} else if (Blocks.Draw[block] == DRAW_GAS) {
@@ -696,8 +803,7 @@ void Physics_Free(void) {
 	Event_Unregister_(&WorldEvents.MapLoaded,    NULL, Physics_OnNewMapLoaded);
 	TickQueue_Clear(&lavaQ);
 	TickQueue_Clear(&waterQ);
-	Mem_Free(lavaLevels);
-	lavaLevels = NULL;
+	Physics_FreeLavaLevels();
 }
 
 void Physics_Tick(void) {

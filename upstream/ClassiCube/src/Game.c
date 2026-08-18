@@ -59,7 +59,7 @@ cc_bool Game_SimpleArmsAnim;
 static float gfx_minFrameMs;
 static cc_bool autoPause;
 #ifdef CC_BUILD_ESP32S3
-#define HOLO_MAX_VIEW_DISTANCE 36
+#define HOLO_MAX_VIEW_DISTANCE 32
 #endif
 
 cc_bool Game_ClassicMode, Game_ClassicHacks;
@@ -381,9 +381,8 @@ static void LoadOptions(void) {
 	Game_AllowServerTextures = !Game_ClassicMode && Options_GetBool(OPT_SERVER_TEXTURES,    true);
 
 #ifdef CC_BUILD_ESP32S3
-	/* 36 blocks is the upper gameplay/cache budget on this target. The map
-	 * renderer may adapt the effective radius down to its 20-block floor when
-	 * a complex view would otherwise miss the 20 FPS target. */
+	/* 32 blocks is the upper gameplay/cache budget on this target. The map
+	 * renderer adapts the effective radius down to its 20-block floor. */
 	Game_MaxViewDistance  = HOLO_MAX_VIEW_DISTANCE;
 	Game_ViewDistance     = Options_GetInt(OPT_VIEW_DISTANCE, 4,
 		HOLO_MAX_VIEW_DISTANCE, HOLO_MAX_VIEW_DISTANCE);
@@ -640,6 +639,13 @@ static void PerformScheduledTasks(float time) {
 	}
 }
 
+#if defined CC_BUILD_ESP32S3 && !defined CC_BUILD_ESP32S3_SCREENSHOTS
+void Game_TakeScreenshot(void) {
+	/* Production ESP32-S3 builds avoid the high-stack PNG encode path.
+	 * Set CLASSICUBE_ENABLE_SCREENSHOTS=ON for a debug build. */
+	Game_ScreenshotRequested = false;
+}
+#else
 void Game_TakeScreenshot(void) {
 	cc_string filename; char fileBuffer[STRING_SIZE];
 	cc_string path;     char pathBuffer[FILENAME_SIZE];
@@ -684,6 +690,7 @@ void Game_TakeScreenshot(void) {
 #endif
 #endif
 }
+#endif
 
 
 #ifdef CC_BUILD_WEB

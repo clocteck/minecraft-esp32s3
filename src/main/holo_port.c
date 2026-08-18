@@ -2,14 +2,13 @@
 
 #include <string.h>
 
-#define DMA_ROWS   16u
-#define DMA_BYTES (CLASSICUBE_DISPLAY_WIDTH * DMA_ROWS * sizeof(uint16_t))
+#define DMA_BYTES (CLASSICUBE_DISPLAY_WIDTH * CLASSICUBE_DMA_ROWS * sizeof(uint16_t))
 #define RENDER_CACHE_BYTES (CLASSICUBE_3D_WIDTH * CLASSICUBE_3D_HEIGHT)
 #define COLOR_BAND_BYTES (CLASSICUBE_3D_WIDTH * CLASSICUBE_COLOR_BAND_ROWS * sizeof(uint16_t))
 #define DEPTH_LUT_BYTES (2u * 1024u)
-#define TERRAIN_CACHE_BYTES (16u * 1024u)
+#define TERRAIN_CACHE_BYTES (20u * 1024u)
 #define PORT_BUFFERS 7u
-#define HOT_VB_ARENA_BYTES (12u * 1024u)
+#define HOT_VB_ARENA_BYTES (8u * 1024u)
 
 typedef struct HotVbBlock {
     uint32_t size;
@@ -89,6 +88,7 @@ bool holo_port_display_acquire(void)
 {
     module_display_desc_t desc;
     module_display_caps_t caps;
+    void *color_band0, *color_band1;
     if (s_display_surface) return true;
     s_frames = 0;
     if (!s_host || !s_host->display.acquire || !s_host->display.pushImageDMA) {
@@ -112,13 +112,25 @@ bool holo_port_display_acquire(void)
         holo_port_set_last_error("display is busy or cannot be acquired");
         return false;
     }
-    /* DMA output is mandatory. Reserve both blocks before optional renderer
-     * caches so internal colour bands can never starve the display path. */
+    /* DMA output is mandatory. Then reserve Z8 before every optional renderer
+     * cache, followed by two smaller colour bands. This gives the random-access
+     * depth path first claim on contiguous internal RAM while keeping the busy
+     * lower half of the RGB565 stage internal without a 55 KiB allocation. */
     if (!holo_port_buffer(DMA_BYTES, 0) || !holo_port_buffer(DMA_BYTES, 1)) {
         if (s_host->display.release) (void)s_host->display.release(s_display_surface);
         s_display_surface = NULL;
         holo_port_set_last_error("cannot reserve RGB565 DMA buffers");
         return false;
+    }
+    if (!holo_port_buffer(RENDER_CACHE_BYTES, 2)) {
+        holo_port_log("[cc.mem] WARN: priority Z8 internal reserve unavailable; using PSRAM");
+        holo_port_set_last_error("");
+    }
+    color_band0 = holo_port_buffer(COLOR_BAND_BYTES, 4);
+    color_band1 = holo_port_buffer(COLOR_BAND_BYTES, 5);
+    if (!color_band0 || !color_band1) {
+        holo_port_log("[cc.mem] WARN: one or more 36-row RGB565 internal bands unavailable");
+        holo_port_set_last_error("");
     }
     if (s_host->display.fillScreen) (void)s_host->display.fillScreen(s_display_surface, 0);
     return true;
@@ -173,11 +185,11 @@ void *holo_port_buffer(size_t bytes, unsigned index)
         } else if (index == 3) {
             holo_port_set_last_error("cannot allocate internal terrain texture cache");
         } else if (index == 4 || index == 5) {
-            holo_port_set_last_error("cannot allocate internal 3D colour band");
+            holo_port_set_last_error("cannot allocate internal 36-row 3D colour band");
         } else if (index == 6) {
             holo_port_set_last_error("cannot allocate internal Z8 encode table");
         } else {
-            holo_port_set_last_error("cannot allocate 10 KiB internal DMA buffer");
+            holo_port_set_last_error("cannot allocate internal LCD DMA block");
         }
     }
     return s_dma_buffers[index];
@@ -203,7 +215,7 @@ bool holo_port_hot_vb_reserve(void)
         HOT_VB_ARENA_BYTES, MODULE_HEAP_INTERNAL | MODULE_HEAP_8BIT);
     if (!s_hot_vb_arena) {
         s_hot_vb_fallbacks++;
-        holo_port_log("[cc.mem] 12 KiB internal dynamic-VB arena unavailable; using PSRAM");
+        holo_port_log("[cc.mem] 8 KiB internal dynamic-VB arena unavailable; using PSRAM");
         return false;
     }
     first = (HotVbBlock *)s_hot_vb_arena;
@@ -211,7 +223,7 @@ bool holo_port_hot_vb_reserve(void)
     first->used = 0;
     s_hot_vb_used = 0;
     s_hot_vb_count = 0;
-    holo_port_log("[cc.mem] dynamic-VB arena=12288 internal contiguous; colder tail=PSRAM");
+    holo_port_log("[cc.mem] dynamic-VB arena=8192 internal contiguous; colder tail=PSRAM");
     return true;
 }
 

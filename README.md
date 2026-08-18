@@ -6,7 +6,7 @@ of producing a standalone flash image.
 
 ## First-version scope
 
-- offline single-player only, with a 128x40x128 generated world
+- offline single-player only, with a 160x40x160 generated world
 - fixed 192x144 3D rendering enlarged beneath native 320x240 UI
 - ClassiCube SoftFP fixed-point software renderer
 - RGB565 DMA output to the host display
@@ -36,23 +36,32 @@ mapping with full-rate sampling, while held/dynamic models retain their exact
 generic path. The ESP32-S3 hot path shares one compact affine triangle kernel
 (retaining the quad kernel only for untextured depth passes), advances
 interpolation planes by scanline, batches Hi-Z coverage bits,
-caches 16 final shaded terrain tiles internally, and submits batches of 32
+caches 24 final shaded terrain tiles internally, avoids evicting slots still
+referenced by Core 0 raster jobs, and submits batches of 32
 complete raster jobs to Core 0.
 Distance fog is disabled: the ordered low-cost variant was visibly granular at
 192x144, while smooth per-pixel fog consumed too much of the full-frame budget.
 The packaged texture set is the complete ClassiCube resource archive with a
 256x256 terrain atlas; the earlier N64-only 256x128 atlas omitted upper rows.
-Two 48-row RGB565 colour bands keep the lower 96 of 144 raster rows (36,864
-bytes) in internal RAM. The top 48 rows use the PSRAM staging buffer, saving
-9,216 bytes of internal RAM; the dynamic-VB arena remains 12 KiB, with its
-colder tail falling back to PSRAM so the mandatory DMA buffers retain priority.
+The 27,648-byte Z8 buffer gets first claim on internal RAM after the mandatory
+LCD DMA blocks. The 192x144 RGB565 3D stage is split evenly: its top 72 rows use
+27,648 bytes of PSRAM, while its busier lower 72 rows use two 36-row internal
+bands totalling 27,648 bytes. LCD output uses two 320x10 RGB565 DMA blocks
+(12,800 bytes total). The Core 0 priority-4 presenter uses a 4 KiB internal
+stack; the main, raster, and audio task stacks remain in PSRAM at 128 KiB,
+6 KiB, and 6 KiB respectively. The optional internal dynamic-vertex arena is
+capped at 8 KiB.
 
-The user view distance is a maximum of 36 blocks. The renderer keeps voxel data,
-resident meshes, and visible meshes on separate distance budgets: one extra
-chunk ring is prebuilt, a second ring provides eviction hysteresis, and the
-visible radius adapts between 20 and the requested maximum when a complex view
-would otherwise fall below the 20 FPS budget. This prevents the old rotate-in-
+The user view distance is a maximum of 32 blocks. The renderer keeps voxel data,
+resident meshes, and visible meshes on separate distance budgets: at the default
+maximum it prebuilds through 48 blocks and unloads beyond 64 blocks. The visible
+radius adapts between 20 and the requested maximum. Two valid frames
+below 9 FPS reduce it by 2, eight valid frames below 12 FPS reduce it by 1,
+and twenty valid frames above 16 FPS increase it by 1. Chunk-build frames and
+long stalls are excluded from these counters. This prevents the old rotate-in-
 place holes without silently treating a missing mesh as distance fog.
+Liquid fog may temporarily reduce the visible radius below 20; leaving the
+liquid restores it immediately to 20 before normal adaptation resumes.
 
 For repeatable profiling, serial output includes camera position, yaw, pitch,
 world mesh vertex count, submitted quads, raster primitives, bounding-box/span
@@ -61,17 +70,20 @@ reciprocal counts. Every
 display frame clears, transforms, and rasterises a new 3D frame; unchanged
 camera views are never reused or skipped. Fixed-seed performance figures must
 therefore represent newly generated 3D frames rather than display refreshes.
-The native HUD keeps the original FPS/vertex-count/position readout; detailed
-pose and pipeline statistics remain on serial. Generated still liquids remain
-static to avoid continuous background remeshing, while player-placed liquids
-still flow.
+The native HUD keeps the original FPS/vertex-count/position readout and adds
+the effective/configured view distance; detailed pose and pipeline statistics
+remain on serial. Generated still liquids remain static to avoid continuous
+background remeshing, while player-placed liquids still flow. Flow levels use
+4-bit entries in lazily allocated 8x8x8 pages; still lava encodes source level
+in its block type and consumes no level page. A 160x40x160 world therefore has
+an 8,000-byte page table instead of a fixed 512,000-byte level array, plus 258
+bytes for each page that currently contains flowing lava.
 
 At fixed view distance 20, the worst fixed-seed view measures about 36.3-37.0 ms
 per complete frame (roughly 27.0-27.4 FPS); simpler directions reach about
-31-40 FPS. With maximum view distance 36, open directions retain the full radius
-at about 25-32 FPS, while the tested worst view settles at an effective radius
-of 26 and about 21.2-21.7 FPS. These are device measurements of newly generated
-frames, not display refreshes or unchanged-frame shortcuts.
+31-40 FPS. The adaptive 20-32 range trades available frame-time headroom for
+distance according to the thresholds above. These are device measurements of
+newly generated frames, not display refreshes or unchanged-frame shortcuts.
 
 Sound effects use one host-owned mono I2S stream. Up to eight virtual voices
 are mixed by a PSRAM-stack worker pinned to Core 0; sound samples remain in
@@ -83,6 +95,11 @@ disabled to avoid a second decoder/streaming workload.
 ```powershell
 powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\tools\build-s3-module.ps1
 ```
+
+PNG screenshots are disabled in production builds. For a debug build, configure
+CMake with `-DCLASSICUBE_ENABLE_SCREENSHOTS=ON` before rebuilding. The main game
+task retains its 128 KiB PSRAM stack for fast legacy `.dat` loading and the
+other large compatibility paths.
 
 The output module is `package/modules/classicube.so`, and the complete deployable
 archive is `dist/classicube-esp32s3-0.1.0.zip`. Copy the complete contents of

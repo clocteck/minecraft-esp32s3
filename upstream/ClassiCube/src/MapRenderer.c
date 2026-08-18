@@ -751,13 +751,15 @@ static int renderDistSquared;
 /* Chunks past this distance are automatically unloaded */
 static int buildDistSquared;
 #ifdef CC_BUILD_ESP32S3
+#define ESP_DYNAMIC_MIN_VIEW      20
+#define ESP_PRELOAD_RING_DISTANCE CHUNK_SIZE
+#define ESP_UNLOAD_RING_DISTANCE  CHUNK_SIZE
 /* Meshes one chunk-ring beyond the visible radius avoid turn/movement holes.
  * A second ring is the eviction hysteresis, while voxel data remains in the
  * fixed classic map independently of these mesh distances. */
 static int unloadDistSquared;
 static int dynamicRenderDistance;
-static float dynamicFrameEma;
-static cc_uint8 dynamicSlowFrames, dynamicFastFrames;
+static cc_uint8 dynamicCriticalFrames, dynamicSlowFrames, dynamicFastFrames;
 
 static float ChunkAabbDistSquared(const struct ChunkInfo* chunk) {
 	float dx = Math_AbsF(Camera.CurrentPos.x - chunk->centreX) - HALF_CHUNK_SIZE;
@@ -792,10 +794,19 @@ int MapRenderer_GetEffectiveViewDistance(void) {
 
 static void CalcViewDists(void) {
 #ifdef CC_BUILD_ESP32S3
-	int buildDist  = max(Game_UserViewDistance, CHUNK_SIZE) + CHUNK_SIZE;
-	int unloadDist = buildDist + CHUNK_SIZE;
-	if (!dynamicRenderDistance || dynamicRenderDistance > Game_ViewDistance) {
-		dynamicRenderDistance = max(Game_ViewDistance, CHUNK_SIZE);
+	int buildDist  = max(Game_UserViewDistance, CHUNK_SIZE) + ESP_PRELOAD_RING_DISTANCE;
+	int unloadDist = buildDist + ESP_UNLOAD_RING_DISTANCE;
+	/* Liquid fog temporarily lowers Game_ViewDistance (lava reaches 1). Keep
+	 * that intentional cap while submerged, but do not let it become the
+	 * adaptive controller's persistent state after leaving the liquid. */
+	if (!dynamicRenderDistance) {
+		dynamicRenderDistance = Game_ViewDistance;
+	} else if (Game_ViewDistance <= ESP_DYNAMIC_MIN_VIEW) {
+		dynamicRenderDistance = Game_ViewDistance;
+	} else if (dynamicRenderDistance < ESP_DYNAMIC_MIN_VIEW) {
+		dynamicRenderDistance = min(Game_ViewDistance, ESP_DYNAMIC_MIN_VIEW);
+	} else if (dynamicRenderDistance > Game_ViewDistance) {
+		dynamicRenderDistance = Game_ViewDistance;
 	}
 	renderDistSquared = dynamicRenderDistance * dynamicRenderDistance;
 	buildDistSquared  = buildDist  * buildDist;
@@ -936,44 +947,49 @@ static void UpdateMapPerfState(void) {
 
 static void UpdateDynamicRenderDistance(float delta, int chunkUpdates) {
 	int oldDistance = dynamicRenderDistance;
-	/* A larger user setting is a maximum, not permission to shrink below the
-	 * already validated 20-block baseline. This lets open views reach 36 while
-	 * geometrically expensive views preserve approximately 20 FPS at radius 20. */
-	int minDistance = min(Game_ViewDistance, 20);
-	int maxDistance = max(Game_ViewDistance, CHUNK_SIZE);
+	/* The configured distance is the ceiling. Adaptation may reduce it as low
+	 * as 20 blocks, but never below either that floor or a smaller user value. */
+	int minDistance = min(Game_ViewDistance, ESP_DYNAMIC_MIN_VIEW);
+	int maxDistance = Game_ViewDistance;
 	int logValues[2];
 
-	/* The ESP32-S3 performance target is defined at a real, fixed 20-block
-	 * radius. Do not silently meet it by reducing the visible radius to 16.
-	 * Larger user settings retain the adaptive controller. */
-	if (Game_ViewDistance <= 20) {
+	if (Game_ViewDistance <= ESP_DYNAMIC_MIN_VIEW) {
 		dynamicRenderDistance = Game_ViewDistance;
 		renderDistSquared = dynamicRenderDistance * dynamicRenderDistance;
-		dynamicFrameEma = 0.0f;
-		dynamicSlowFrames = dynamicFastFrames = 0;
+		dynamicCriticalFrames = dynamicSlowFrames = dynamicFastFrames = 0;
 		return;
 	}
 
-	/* Chunk build spikes are transient and already rate limited. Base the view
-	 * controller only on completed render-heavy frames. Ignore pauses/stalls. */
+	/* Chunk build spikes are transient and already rate limited. Count only
+	 * completed render-heavy frames, while ignoring pauses and long stalls. */
 	if (chunkUpdates || chunksNeedScan || delta <= 0.0f || delta > 0.20f) return;
-	if (dynamicFrameEma <= 0.0f) dynamicFrameEma = delta;
-	else dynamicFrameEma += (delta - dynamicFrameEma) * 0.125f;
 
-	if (dynamicFrameEma > 0.052f && dynamicRenderDistance > minDistance) {
+	if (delta > (1.0f / 9.0f) && dynamicRenderDistance > minDistance) {
+		/* Critical frames also count towards the gentler under-12 FPS path,
+		 * unless the two-frame critical path fires first. */
 		dynamicFastFrames = 0;
-		if (++dynamicSlowFrames >= 8) {
+		dynamicSlowFrames++;
+		if (++dynamicCriticalFrames >= 2) {
 			dynamicRenderDistance = max(minDistance, dynamicRenderDistance - 2);
+			dynamicCriticalFrames = dynamicSlowFrames = 0;
+		} else if (dynamicSlowFrames >= 8) {
+			dynamicRenderDistance = max(minDistance, dynamicRenderDistance - 1);
+			dynamicCriticalFrames = dynamicSlowFrames = 0;
+		}
+	} else if (delta > (1.0f / 12.0f) && dynamicRenderDistance > minDistance) {
+		dynamicCriticalFrames = dynamicFastFrames = 0;
+		if (++dynamicSlowFrames >= 8) {
+			dynamicRenderDistance = max(minDistance, dynamicRenderDistance - 1);
 			dynamicSlowFrames = 0;
 		}
-	} else if (dynamicFrameEma < 0.044f && dynamicRenderDistance < maxDistance) {
-		dynamicSlowFrames = 0;
-		if (++dynamicFastFrames >= 45) {
+	} else if (delta < (1.0f / 16.0f) && dynamicRenderDistance < maxDistance) {
+		dynamicCriticalFrames = dynamicSlowFrames = 0;
+		if (++dynamicFastFrames >= 20) {
 			dynamicRenderDistance++;
 			dynamicFastFrames = 0;
 		}
 	} else {
-		dynamicSlowFrames = dynamicFastFrames = 0;
+		dynamicCriticalFrames = dynamicSlowFrames = dynamicFastFrames = 0;
 	}
 	if (dynamicRenderDistance == oldDistance) return;
 

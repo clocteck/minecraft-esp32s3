@@ -24,6 +24,7 @@
 #include "Options.h"
 #include "InputHandler.h"
 #include "Protocol.h"
+#include "MapRenderer.h"
 
 #define CHAT_MAX_STATUS Array_Elems(Chat_Status)
 #define CHAT_MAX_BOTTOMRIGHT Array_Elems(Chat_BottomRight)
@@ -117,6 +118,13 @@ static void HUDScreen_RemakeLine1(struct HUDScreen* s) {
 
 		indices = ICOUNT(Game_Vertices);
 		String_Format1(&status, "%i vertices", &indices);
+
+#ifdef CC_BUILD_ESP32S3
+		{
+			int effectiveView = MapRenderer_GetEffectiveViewDistance();
+			String_Format2(&status, ", view %i/%i", &effectiveView, &Game_ViewDistance);
+		}
+#endif
 
 		ping = Ping_AveragePingMS();
 		if (ping) String_Format1(&status, ", ping %i ms", &ping);

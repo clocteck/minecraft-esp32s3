@@ -164,12 +164,14 @@ static cc_uint32 raster_to_color_rowh[CLASSICUBE_3D_HEIGHT];
 #define SOFTFP_LOWRES_COLOR_STAGE
 static SoftPixel* rasterColorBuffer;
 static SoftPixel* rasterColorInternal[2];
+static SoftPixel* rasterColorFallback[2];
 static SoftPixel* rasterColorRowsFallback[CLASSICUBE_3D_HEIGHT];
 static SoftPixel** rasterColorRows = rasterColorRowsFallback;
+#define SOFTFP_COLOR_ROW(y) rasterColorRows[(y)]
 #endif
 #endif
 #ifdef CC_BUILD_SOFTFP_TERRAIN_TILE_CACHE
-#define TERRAIN_TILE_CACHE_SLOTS 16
+#define TERRAIN_TILE_CACHE_SLOTS 24
 #define TERRAIN_TILE_SIZE 16
 #define TERRAIN_TILE_PIXELS (TERRAIN_TILE_SIZE * TERRAIN_TILE_SIZE)
 static void* terrainTileCacheMemory;
@@ -397,7 +399,7 @@ typedef struct TerrainRasterScratch {
 static TerrainRasterScratch terrainRasterScratchFallback;
 static TerrainRasterScratch* terrainRasterScratch = &terrainRasterScratchFallback;
 #ifdef CC_BUILD_SOFTFP_CORE0_RASTER
-#define SOFTFP_RASTER_STACK_BYTES (8u * 1024u)
+#define SOFTFP_RASTER_STACK_BYTES (6u * 1024u)
 #define SOFTFP_RASTER_BATCH_JOBS 32u
 #define SOFTFP_RASTER_JOB_OPAQUE 1u
 #define SOFTFP_RASTER_JOB_AFFINE 2u
@@ -408,6 +410,7 @@ static cc_uint8 softfpRasterFillCount[2];
 static volatile cc_uint8 softfpRasterWorkIndex;
 static volatile cc_uint8 softfpRasterWorkCount;
 static volatile cc_uint8 softfpRasterStop;
+static cc_uint32 softfpRasterCacheRefs[2];
 static void* volatile softfpRasterTask;
 static module_sync_handle_t softfpRasterReady;
 static module_sync_handle_t softfpRasterIdle;
@@ -517,9 +520,6 @@ void Gfx_Create(void) {
     }
 #endif
 #ifdef SOFTFP_LOWRES_COLOR_STAGE
-    /* Two internal RGB565 bands cover the lower 96 rows. The top 48 rows use
-     * the existing PSRAM staging buffer, preserving about 9 KiB of internal
-     * headroom compared with the former pair of 12-row top bands. */
     rasterColorInternal[0] = (SoftPixel*)holo_port_buffer(
         CLASSICUBE_3D_WIDTH * CLASSICUBE_COLOR_BAND_ROWS * sizeof(SoftPixel), 4);
     rasterColorInternal[1] = (SoftPixel*)holo_port_buffer(
@@ -538,7 +538,10 @@ static void DestroyBuffers(void) {
 #endif
 #ifdef SOFTFP_LOWRES_COLOR_STAGE
     Mem_Free(rasterColorBuffer);
+    Mem_Free(rasterColorFallback[0]);
+    Mem_Free(rasterColorFallback[1]);
     rasterColorBuffer = NULL;
+    rasterColorFallback[0] = rasterColorFallback[1] = NULL;
 #endif
 #ifdef CC_BUILD_SOFTFP_W_DEPTH8
     if (depthBuffer && !depthBufferInternal) Mem_Free(depthBuffer);
@@ -649,6 +652,12 @@ static int texSinglePixel;
 static CCTexture* terrainTileCacheOwners[TERRAIN_TILE_CACHE_SLOTS];
 static cc_uint16 terrainTileCacheIndices[TERRAIN_TILE_CACHE_SLOTS];
 static cc_uint8 terrainTileCacheNext;
+static CC_INLINE int TerrainTileCache_NextSlot(void) {
+    int slot = terrainTileCacheNext;
+    terrainTileCacheNext++;
+    if (terrainTileCacheNext >= TERRAIN_TILE_CACHE_SLOTS) terrainTileCacheNext = 0;
+    return slot;
+}
 #if defined CC_BUILD_ESP32S3 && defined SOFTFP_FAST_TERRAIN_KERNEL
 /* Opaque terrain tiles are shaded once into the existing internal cache.
  * The hot raster loop can then fetch one final RGB565 value instead of an
@@ -657,12 +666,37 @@ static cc_uint8 terrainTileCacheNext;
 static cc_uint32 terrainTileCacheTintKeys[TERRAIN_TILE_CACHE_SLOTS];
 static cc_uint8 terrainTileCacheOpaque[TERRAIN_TILE_CACHE_SLOTS];
 #ifdef CC_BUILD_SOFTFP_CORE0_RASTER
+static int TerrainTileCache_SlotForPixels(const cc_uint16* pixels) {
+    cc_uintptr base = (cc_uintptr)terrainTileCacheMemory;
+    cc_uintptr address = (cc_uintptr)pixels;
+    const cc_uintptr slotBytes = TERRAIN_TILE_PIXELS * sizeof(cc_uint16);
+    cc_uintptr offset;
+    if (!base || address < base || address >= base + TERRAIN_TILE_CACHE_SLOTS * slotBytes) return -1;
+    offset = address - base;
+    if (offset % slotBytes) return -1;
+    return (int)(offset / slotBytes);
+}
+
 static int TerrainTileCache_SelectSlot(void) {
-    /* A cache hit never modifies texels. Before a miss reuses any slot, wait
-     * for the sole Core 0 job to finish so its samplePixels pointer remains
-     * immutable for the complete upper-band raster. */
+    cc_uint32 refs;
+    int i, slot;
+    /* Jobs keep direct pointers into cache slots. Prefer any slot no queued or
+     * running Core 0 job still references, preserving pipeline overlap across
+     * cache misses. Only a completely busy cache requires a full barrier. */
+    refs = __atomic_load_n(&softfpRasterCacheRefs[0], __ATOMIC_ACQUIRE) |
+           __atomic_load_n(&softfpRasterCacheRefs[1], __ATOMIC_ACQUIRE);
+    for (i = 0; i < TERRAIN_TILE_CACHE_SLOTS; i++) {
+        slot = TerrainTileCache_NextSlot();
+        if (!(refs & (1u << slot))) return slot;
+    }
     SoftFP_RasterWorkerFlush();
-    return terrainTileCacheNext++ % TERRAIN_TILE_CACHE_SLOTS;
+    refs = __atomic_load_n(&softfpRasterCacheRefs[0], __ATOMIC_ACQUIRE) |
+           __atomic_load_n(&softfpRasterCacheRefs[1], __ATOMIC_ACQUIRE);
+    for (i = 0; i < TERRAIN_TILE_CACHE_SLOTS; i++) {
+        slot = TerrainTileCache_NextSlot();
+        if (!(refs & (1u << slot))) return slot;
+    }
+    return -1;
 }
 #endif
 #endif
@@ -695,7 +729,7 @@ static SoftTexel* TerrainTileCache_Get(int tileIndex) {
     slot = TerrainTileCache_SelectSlot();
     if (slot < 0) return NULL;
 #else
-    slot = terrainTileCacheNext++ % TERRAIN_TILE_CACHE_SLOTS;
+    slot = TerrainTileCache_NextSlot();
 #endif
     Mem_Copy(pixels + slot * TERRAIN_TILE_PIXELS,
              curTexPixels + tileIndex * TERRAIN_TILE_PIXELS,
@@ -733,7 +767,7 @@ static CC_NOINLINE SoftPixel* TerrainTileCache_GetShaded(int tileIndex,
     slot = TerrainTileCache_SelectSlot();
     if (slot < 0) return NULL;
 #else
-    slot = terrainTileCacheNext++ % TERRAIN_TILE_CACHE_SLOTS;
+    slot = TerrainTileCache_NextSlot();
 #endif
     Mem_Copy(pixels + slot * TERRAIN_TILE_PIXELS,
              curTexPixels + tileIndex * TERRAIN_TILE_PIXELS,
@@ -1012,7 +1046,7 @@ static void ScaleRasterRows(void* arg) {
 	const SoftFPUpscaleJob* job = (const SoftFPUpscaleJob*)arg;
 	int y;
 	for (y = job->firstRow; y < job->lastRow; y++) {
-		const SoftPixel* src = rasterColorRows[y];
+		const SoftPixel* src = SOFTFP_COLOR_ROW(y);
 		cc_uint32 rowh = raster_to_color_rowh[y];
 		SoftPixel* dst = colorBuffer + (rowh & ~RASTER_GROUP_DOUBLE_Y);
 
@@ -1117,10 +1151,10 @@ static void ClearColorBuffer(void) {
     SoftPixel fill = SoftPixel_FromBitmap(clearColor);
 
 #ifdef SOFTFP_LOWRES_COLOR_STAGE
-    /* Optional 48-row internal bands share this row table with the PSRAM
-     * fallback. Clear through the table so either allocation layout works. */
+    /* The low-resolution stage is contiguous in either internal RAM or its
+     * PSRAM fallback. */
     for (y = 0; y < raster_height; y++) {
-        target = rasterColorRows[y];
+        target = SOFTFP_COLOR_ROW(y);
         for (x = 0; x + 3 < raster_width; x += 4) {
             target[x + 0] = fill; target[x + 1] = fill;
             target[x + 2] = fill; target[x + 3] = fill;
@@ -2666,7 +2700,7 @@ static CC_INLINE SoftPixel BlendSoftPixel(int srcR, int srcG, int srcB,
 #ifdef SOFTFP_GROUPED_RASTER
 static CC_INLINE void StoreRasterGroup(int rasterX, int rasterY, SoftPixel color) {
 #ifdef SOFTFP_LOWRES_COLOR_STAGE
-    rasterColorRows[rasterY][rasterX] = color;
+    SOFTFP_COLOR_ROW(rasterY)[rasterX] = color;
 #else
     cc_uint32 rowh = raster_to_color_rowh[rasterY];
     cc_uint16 xw = raster_to_color_xw[rasterX];
@@ -2688,7 +2722,7 @@ static CC_INLINE void StoreRasterGroup(int rasterX, int rasterY, SoftPixel color
 static CC_INLINE void BlendRasterGroup(int rasterX, int rasterY,
     int srcR, int srcG, int srcB, int srcA) {
 #ifdef SOFTFP_LOWRES_COLOR_STAGE
-    SoftPixel* dst = rasterColorRows[rasterY] + rasterX;
+    SoftPixel* dst = SOFTFP_COLOR_ROW(rasterY) + rasterX;
     *dst = BlendSoftPixel(srcR, srcG, srcB, srcA, *dst);
 #else
     cc_uint32 rowh = raster_to_color_rowh[rasterY];
@@ -3188,7 +3222,7 @@ static CC_NOINLINE void RasterizeTerrainOpaqueLutDirect(TerrainRasterScratch* sc
                 (cc_uint16)(1u << ((y & 3) << 2));
             DepthValue* depth = depthBuffer + y * db_stride + spanMinX;
 #ifdef SOFTFP_LOWRES_COLOR_STAGE
-            SoftPixel* colorDst = rasterColorRows[y] + spanMinX;
+            SoftPixel* colorDst = SOFTFP_COLOR_ROW(y) + spanMinX;
 #endif
             spanPixelsLocal += (cc_uint32)(spanMaxX - spanMinX + 1);
             x = spanMinX;
@@ -3342,6 +3376,7 @@ static cc_bool SoftFP_RasterWorkerSubmitPending(void) {
         for (i = 0; i < count; i++) {
             SoftFP_RasterWorkerRun(&softfpRasterJobs[index][i]);
         }
+        __atomic_store_n(&softfpRasterCacheRefs[index], 0u, __ATOMIC_RELEASE);
         softfpRasterFallbacksFrame += count;
         softfpRasterFillCount[index] = 0;
         return true;
@@ -3360,6 +3395,7 @@ static cc_bool SoftFP_RasterWorkerSubmitPending(void) {
         for (i = 0; i < count; i++) {
             SoftFP_RasterWorkerRun(&softfpRasterJobs[index][i]);
         }
+        __atomic_store_n(&softfpRasterCacheRefs[index], 0u, __ATOMIC_RELEASE);
         softfpRasterFallbacksFrame += count;
         softfpRasterWorkCount = 0;
         softfpRasterFillCount[index] = 0;
@@ -3404,6 +3440,7 @@ static void SoftFP_RasterWorkerTask(void* arg) {
         for (i = 0; i < count; i++) {
             SoftFP_RasterWorkerRun(&softfpRasterJobs[index][i]);
         }
+        __atomic_store_n(&softfpRasterCacheRefs[index], 0u, __ATOMIC_RELEASE);
         softfpRasterWorkCount = 0;
         __atomic_store_n(&softfpRasterBusy, 0u, __ATOMIC_RELEASE);
         (void)host->sync.give(softfpRasterIdle);
@@ -3431,6 +3468,7 @@ static cc_bool SoftFP_RasterWorkerStart(void) {
     __atomic_store_n(&softfpRasterBusy, 0u, __ATOMIC_RELEASE);
     softfpRasterFillIndex = 0;
     softfpRasterFillCount[0] = softfpRasterFillCount[1] = 0;
+    softfpRasterCacheRefs[0] = softfpRasterCacheRefs[1] = 0;
     softfpRasterWorkIndex = softfpRasterWorkCount = 0;
     softfpRasterStop = 0;
     result = host->task.create_ex("cc_raster", SoftFP_RasterWorkerTask, NULL,
@@ -3438,7 +3476,7 @@ static cc_bool SoftFP_RasterWorkerStart(void) {
                                  MODULE_HEAP_PSRAM | MODULE_HEAP_8BIT, &task);
     if (result != MODULE_OK || !task) goto fail;
     softfpRasterTask = task;
-    Platform_LogConst("[cc.raster] Core0 full-quad pipeline batch32 prio4 exact-Z8");
+    Platform_LogConst("[cc.raster] Core0 full-quad pipeline batch32 prio4 stack=6144 PSRAM exact-Z8");
     return true;
 
 fail:
@@ -3473,11 +3511,14 @@ static void SoftFP_RasterWorkerStop(void) {
     softfpRasterStop = 0;
     softfpRasterFillIndex = 0;
     softfpRasterFillCount[0] = softfpRasterFillCount[1] = 0;
+    softfpRasterCacheRefs[0] = softfpRasterCacheRefs[1] = 0;
     softfpRasterWorkIndex = softfpRasterWorkCount = 0;
     __atomic_store_n(&softfpRasterBusy, 0u, __ATOMIC_RELEASE);
 }
 
 static cc_bool SoftFP_RasterWorkerQueue(const TerrainRasterScratch* scratch) {
+    TerrainRasterScratch* job;
+    int cacheSlot;
     unsigned index, count;
     if (!softfpRasterTask) return false;
     index = softfpRasterFillIndex;
@@ -3487,7 +3528,12 @@ static cc_bool SoftFP_RasterWorkerQueue(const TerrainRasterScratch* scratch) {
         index = softfpRasterFillIndex;
         count = softfpRasterFillCount[index];
     }
-    softfpRasterJobs[index][count] = *scratch;
+    job = &softfpRasterJobs[index][count];
+    *job = *scratch;
+    cacheSlot = TerrainTileCache_SlotForPixels(job->samplePixels);
+    if (cacheSlot >= 0) {
+        __atomic_fetch_or(&softfpRasterCacheRefs[index], 1u << cacheSlot, __ATOMIC_ACQ_REL);
+    }
     softfpRasterFillCount[index] = (cc_uint8)(count + 1u);
     if (count + 1u == SOFTFP_RASTER_BATCH_JOBS) {
         return SoftFP_RasterWorkerSubmitPending();
@@ -3539,7 +3585,7 @@ static CC_NOINLINE void RasterizeTerrainAffineDirect(TerrainRasterScratch* scrat
                 (cc_uint16)(1u << ((y & 3) << 2));
             DepthValue* depth = depthBuffer + y * db_stride + spanMinX;
 #ifdef SOFTFP_LOWRES_COLOR_STAGE
-            SoftPixel* colorDst = rasterColorRows[y] + spanMinX;
+            SoftPixel* colorDst = SOFTFP_COLOR_ROW(y) + spanMinX;
 #endif
             spanPixelsLocal += (cc_uint32)(spanMaxX - spanMinX + 1);
 
@@ -3733,7 +3779,7 @@ static CC_NOINLINE void RasterizeTerrainHalfBlend(TerrainRasterScratch* scratch)
             int vInterp = rowV + scratch->stepV * spanLower;
             DepthValue* depth = depthBuffer + y * db_stride + spanMinX;
 #ifdef SOFTFP_LOWRES_COLOR_STAGE
-            SoftPixel* colorDst = rasterColorRows[y] + spanMinX;
+            SoftPixel* colorDst = SOFTFP_COLOR_ROW(y) + spanMinX;
 #endif
             spanPixelsLocal += (cc_uint32)(spanMaxX - spanMinX + 1);
 
@@ -4681,7 +4727,7 @@ static void DrawTriangle3DGeneric(VertexFixed* V0, VertexFixed* V1,
         if (fastSolidDepthBlend) {
             int solidW = w_interp;
             DepthValue* solidDepth = depthBuffer + y * db_stride + spanMinX;
-            SoftPixel* solidDst = rasterColorRows[y] + spanMinX;
+            SoftPixel* solidDst = SOFTFP_COLOR_ROW(y) + spanMinX;
             for (x = spanMinX; x <= spanMaxX;
                  x++, solidDepth++, solidDst++, solidW += step_w) {
                 DepthValue solidZ;
@@ -5810,28 +5856,38 @@ void Gfx_OnWindowResize(int width, int height) {
     }
 #endif
     rasterColorBuffer = (SoftPixel*)Mem_Alloc(
-        raster_width, raster_height * sizeof(SoftPixel), "192x144 staged color buffer");
+        raster_width, CLASSICUBE_COLOR_PSRAM_ROWS * sizeof(SoftPixel),
+        "192x72 staged color buffer");
+    if (!rasterColorInternal[0]) {
+        rasterColorFallback[0] = (SoftPixel*)Mem_Alloc(
+            raster_width, CLASSICUBE_COLOR_BAND_ROWS * sizeof(SoftPixel),
+            "192x36 staged color fallback A");
+    }
+    if (!rasterColorInternal[1]) {
+        rasterColorFallback[1] = (SoftPixel*)Mem_Alloc(
+            raster_width, CLASSICUBE_COLOR_BAND_ROWS * sizeof(SoftPixel),
+            "192x36 staged color fallback B");
+    }
     {
         int row;
         for (row = 0; row < raster_height; row++) {
-            if (row >= CLASSICUBE_COLOR_BAND_ROWS &&
-                row < CLASSICUBE_COLOR_BAND_ROWS * 2 && rasterColorInternal[0]) {
-                rasterColorRows[row] = rasterColorInternal[0] +
-                    (row - CLASSICUBE_COLOR_BAND_ROWS) * raster_width;
-            } else if (row >= CLASSICUBE_COLOR_BAND_ROWS * 2 &&
-                       rasterColorInternal[1]) {
-                rasterColorRows[row] = rasterColorInternal[1] +
-                    (row - CLASSICUBE_COLOR_BAND_ROWS * 2) * raster_width;
-            } else {
+            if (row < CLASSICUBE_COLOR_PSRAM_ROWS) {
                 rasterColorRows[row] = rasterColorBuffer + row * raster_width;
+            } else {
+                int localRow = row - CLASSICUBE_COLOR_PSRAM_ROWS;
+                int band = localRow / CLASSICUBE_COLOR_BAND_ROWS;
+                SoftPixel* pixels = rasterColorInternal[band] ?
+                    rasterColorInternal[band] : rasterColorFallback[band];
+                rasterColorRows[row] = pixels +
+                    (localRow % CLASSICUBE_COLOR_BAND_ROWS) * raster_width;
             }
         }
         if (rasterColorInternal[0] && rasterColorInternal[1]) {
-            Platform_LogConst("[cc.gfx] color-hot=lower96 rows RGB565 internal=36864");
+            Platform_LogConst("[cc.gfx] color=lower72 internal=27648 + top72 PSRAM=27648");
         } else if (rasterColorInternal[0] || rasterColorInternal[1]) {
-            Platform_LogConst("[cc.gfx] color-hot=48 rows RGB565 internal=18432");
+            Platform_LogConst("[cc.gfx] color=36 rows internal=13824 + 108 rows PSRAM=41472");
         } else {
-            Platform_LogConst("[cc.gfx] color-hot unavailable; RGB565 stage in PSRAM");
+            Platform_LogConst("[cc.gfx] color bands internal unavailable; 192x144 RGB565 in PSRAM");
         }
     }
 #endif
@@ -5930,7 +5986,7 @@ void Gfx_OnWindowResize(int width, int height) {
     Platform_LogConst("[cc.gfx] raster=3D-lowres Z32 scaled UI=320x240");
 #endif
 #ifdef SOFTFP_LOWRES_COLOR_STAGE
-    Platform_LogConst("[cc.gfx] color=192x144 RGB565 split-hot stage upscale=packed-single-pass-before-UI");
+    Platform_LogConst("[cc.gfx] color=192x144 RGB565 lower72-hot split upscale=packed-single-pass-before-UI");
 #endif
 #endif
 #ifdef CC_BUILD_SOFTFP_QUAD_FRUSTUM_CULL
@@ -5939,7 +5995,7 @@ void Gfx_OnWindowResize(int width, int height) {
     Platform_LogConst("[cc.gfx] terrain=PS1-style affine, full-rate sampling");
 #ifdef CC_BUILD_SOFTFP_TERRAIN_TILE_CACHE
     if (terrainTileCacheMemory) {
-        Platform_LogConst("[cc.gfx] terrain-texture-cache=16x16x16 A1RGB555 internal");
+        Platform_LogConst("[cc.gfx] terrain-texture-cache=24x16x16 referenced-slot-safe internal");
     } else {
         Platform_LogConst("[cc.gfx] terrain-texture-cache unavailable; direct PSRAM sampling");
     }

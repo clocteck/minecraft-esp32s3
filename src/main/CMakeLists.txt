@@ -19,6 +19,11 @@ idf_component_register(
     REQUIRES
         newlib)
 
+option(CLASSICUBE_ENABLE_SCREENSHOTS "Enable PNG screenshots in ESP32-S3 debug builds" OFF)
+if(CLASSICUBE_ENABLE_SCREENSHOTS)
+    target_compile_definitions(${COMPONENT_LIB} PRIVATE CC_BUILD_ESP32S3_SCREENSHOTS=1)
+endif()
+
 target_compile_options(${COMPONENT_LIB} PRIVATE
     -O2
     -fPIC

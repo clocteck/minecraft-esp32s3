@@ -27,7 +27,7 @@
 #define BTN_R2     2048u
 #define BTN_SELECT 4096u
 #define BTN_START  8192u
-#define PRESENT_STACK_BYTES (8u * 1024u)
+#define PRESENT_STACK_BYTES (4u * 1024u)
 #define RIGHT_STICK_LOOK_MULTIPLIER 6.0f
 
 struct _DisplayData DisplayInfo;
@@ -86,6 +86,7 @@ static cc_bool StartPresentWorker(void)
     const module_host_api_v2 *host = s_window_host;
     void *task = NULL;
     int32_t result = MODULE_ERR_UNSUPPORTED;
+    if (s_present_task) return true;
     if (!host || !host->sync.create_counting || !host->sync.take ||
         !host->sync.give || !host->sync.destroy) return false;
 
@@ -100,12 +101,12 @@ static cc_bool StartPresentWorker(void)
     s_present_pixels = NULL;
     if (host->task.create_ex) {
         result = host->task.create_ex("cc_present", PresentWorker, NULL,
-                                     PRESENT_STACK_BYTES, 3u, 0,
+                                     PRESENT_STACK_BYTES, 4u, 0,
                                      MODULE_HEAP_INTERNAL | MODULE_HEAP_8BIT,
                                      &task);
     } else if (host->task.create) {
         result = host->task.create("cc_present", PresentWorker, NULL,
-                                  PRESENT_STACK_BYTES, 3u, 0, &task);
+                                  PRESENT_STACK_BYTES, 4u, 0, &task);
     }
     if (result != MODULE_OK || !task) {
         host->sync.destroy(s_present_done);  s_present_done = NULL;
@@ -114,7 +115,7 @@ static cc_bool StartPresentWorker(void)
     }
     s_present_task = task;
     s_core1_yield_count = 0;
-    holo_port_log("[cc.present] Core1 idle yield=1ms/8 full frames");
+    holo_port_log("[cc.present] worker=Core0 prio4 stack=4096 internal; Core1 idle yield=1ms/8 full frames");
     return true;
 }
 
@@ -159,6 +160,9 @@ void Window_Init(void)
     Window_Main.UIScaleX = DEFAULT_UI_SCALE_X;
     Window_Main.UIScaleY = DEFAULT_UI_SCALE_Y;
     s_close_raised = false;
+    /* Start before renderer caches and dynamic VBs consume/fragment internal
+     * RAM. The worker sleeps until the first completed framebuffer arrives. */
+    (void)StartPresentWorker();
 }
 
 void Window_Free(void) { }
@@ -276,9 +280,9 @@ static cc_bool PresentFramebuffer(HoloFramebufferPixel *pixels, uint64_t *conver
     if (!host || !surface || !pixels || !host->display.startWrite ||
         !host->display.pushImageDMA || !host->display.endWrite) return false;
     dma[0] = (uint16_t *)holo_port_buffer(
-        CLASSICUBE_DISPLAY_WIDTH * 16 * sizeof(uint16_t), 0);
+        CLASSICUBE_DISPLAY_WIDTH * CLASSICUBE_DMA_ROWS * sizeof(uint16_t), 0);
     dma[1] = (uint16_t *)holo_port_buffer(
-        CLASSICUBE_DISPLAY_WIDTH * 16 * sizeof(uint16_t), 1);
+        CLASSICUBE_DISPLAY_WIDTH * CLASSICUBE_DMA_ROWS * sizeof(uint16_t), 1);
     if (!dma[0] || !dma[1]) return false;
 
     started = holo_perf_now_us();
@@ -288,9 +292,9 @@ static cc_bool PresentFramebuffer(HoloFramebufferPixel *pixels, uint64_t *conver
     }
     dma_total += holo_perf_now_us() - started;
 
-    for (y = 0; y < CLASSICUBE_RENDER_HEIGHT; y += 16) {
-        uint16_t *block = dma[(y / 16) & 1];
-        int rows = min(16, CLASSICUBE_RENDER_HEIGHT - y);
+    for (y = 0; y < CLASSICUBE_RENDER_HEIGHT; y += CLASSICUBE_DMA_ROWS) {
+        uint16_t *block = dma[(y / CLASSICUBE_DMA_ROWS) & 1];
+        int rows = min(CLASSICUBE_DMA_ROWS, CLASSICUBE_RENDER_HEIGHT - y);
         started = holo_perf_now_us();
         memcpy(block, pixels + y * CLASSICUBE_RENDER_WIDTH,
                (size_t)rows * CLASSICUBE_DISPLAY_WIDTH * sizeof(uint16_t));

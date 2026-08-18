@@ -15,7 +15,7 @@
 #define HOLO_AUDIO_BLOCK_FRAMES 256
 #define HOLO_AUDIO_BLOCK_BYTES  (HOLO_AUDIO_BLOCK_FRAMES * sizeof(cc_int16))
 #define HOLO_AUDIO_VOICES       8
-#define HOLO_AUDIO_STACK_BYTES  (8u * 1024u)
+#define HOLO_AUDIO_STACK_BYTES  (6u * 1024u)
 
 struct AudioContext {
     const cc_int16 *samples;
@@ -242,7 +242,7 @@ cc_bool AudioBackend_Init(void) {
         return false;
     }
     s_audio_task = task;
-    holo_port_log("[cc.audio] output=22050Hz S16 mono mixer=8 task=Core0 stack=PSRAM");
+    holo_port_log("[cc.audio] output=22050Hz S16 mono mixer=8 task=Core0 prio4 stack=6144 PSRAM");
     return true;
 }
 
