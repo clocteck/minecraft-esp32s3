@@ -214,7 +214,9 @@ static void RenderNormalBatch(int batch) {
 		hasNormParts[batch] = true;
 #ifdef CC_BUILD_ESP32S3
 		farLod = ChunkUsesFarLod(info);
-		lodHint = DRAW_HINT_AFFINE;
+		/* Nearby large oblique faces may opt into sparse 8-pixel perspective
+		 * correction. The far ring stays purely affine. */
+		lodHint = farLod ? DRAW_HINT_AFFINE : DRAW_HINT_NONE;
 #endif
 
 #if defined CC_BUILD_ESP32S3 && defined CC_BUILD_SOFTFP_QUAD_FRUSTUM_CULL
@@ -458,9 +460,13 @@ static void RenderTranslucentBatch(int batch) {
 }
 
 void MapRenderer_RenderTranslucent(float delta) {
-	int vertices, batch;
+	int batch;
+#ifndef CC_BUILD_ESP32S3
+	int vertices;
+#endif
 	if (!mapChunks) return;
 
+#ifndef CC_BUILD_ESP32S3
 	/* First fill depth buffer */
 	vertices = Game_Vertices;
 	Gfx_SetVertexFormat(VERTEX_FORMAT_TEXTURED);
@@ -476,24 +482,46 @@ void MapRenderer_RenderTranslucent(float delta) {
 		}
 	}
 	Game_Vertices = vertices;
+#else
+	/* renderChunks is sorted near-to-far. On the software ESP32-S3 backend,
+	 * blend the nearest translucent surface and commit its depth in one pass.
+	 * The old generic path transformed and rasterised every water/glass face
+	 * twice (depth prepass, then colour), despite retaining only the nearest
+	 * translucent layer. */
+	Gfx_SetVertexFormat(VERTEX_FORMAT_TEXTURED);
+#endif
 
 	/* Then actually draw the transluscent blocks */
 	Gfx_SetAlphaBlending(true);
 	Gfx_DepthOnlyRendering(false);
+#ifndef CC_BUILD_ESP32S3
 	Gfx_SetDepthWrite(false); /* already calculated depth values in depth pass */
+#else
+	Gfx_SetDepthWrite(true);  /* combined colour + nearest translucent depth */
+#endif
 
 	Gfx_EnableMipmaps();
 	for (batch = 0; batch < MapRenderer_1DUsedCount; batch++) 
 	{
 		if (tranPartsCount[batch] <= 0) continue;
+#ifdef CC_BUILD_ESP32S3
+		if (hasTranParts[batch] || checkTranParts[batch]) {
+			Atlas1D_Bind(batch);
+			RenderTranslucentBatch(batch);
+			checkTranParts[batch] = false;
+		}
+#else
 		if (!hasTranParts[batch]) continue;
 
 		Atlas1D_Bind(batch);
 		RenderTranslucentBatch(batch);
+#endif
 	}
 	Gfx_DisableMipmaps();
 
+#ifndef CC_BUILD_ESP32S3
 	Gfx_SetDepthWrite(true);
+#endif
 	/* If we weren't under water, render weather after to blend properly */
 	if (!inTranslucent && Env.Weather != WEATHER_SUNNY) {
 		Gfx_SetAlphaTest(true);
@@ -501,6 +529,10 @@ void MapRenderer_RenderTranslucent(float delta) {
 		Gfx_SetAlphaTest(false);
 	}
 	Gfx_SetAlphaBlending(false);
+#ifdef CC_BUILD_ESP32S3
+	/* Complete queued translucent FIFO jobs before selection/held/UI writes. */
+	Gfx_FlushRasterWorker();
+#endif
 }
 
 
@@ -1208,6 +1240,9 @@ static void OnInit(void) {
 	chunkPos   = IVec3_MaxValue();
 	maxChunkUpdates = Options_GetInt(OPT_MAX_CHUNK_UPDATES, 4, 1024, 30);
 	CalcViewDists();
+#ifdef CC_BUILD_ESP32S3
+	Platform_LogConst("[cc.gfx] translucent=single-pass RGB565-smooth50 pair-sample depth-write split-rows");
+#endif
 }
 
 struct IGameComponent MapRenderer_Component = {

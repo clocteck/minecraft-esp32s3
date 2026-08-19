@@ -516,7 +516,7 @@ static void Render3DFrame(float delta, float t) {
 	struct Matrix mvp;
 	Vec3 pos;
 #ifdef CC_BUILD_ESP32S3
-	cc_uint64 perfMark, heldPerfMark, midPerfMark;
+	cc_uint64 perfMark, heldPerfMark, midPerfMark, shadowSelectionMark;
 	perfMark = Stopwatch_Measure();
 #endif
 
@@ -560,15 +560,23 @@ static void Render3DFrame(float delta, float t) {
 	holo_perf_add(HOLO_PERF_MAP_SIDES,
 		Stopwatch_ElapsedMicroseconds(perfMark, Stopwatch_Measure()));
 	perfMark = Stopwatch_Measure();
+	shadowSelectionMark = perfMark;
 #endif
 
 	EntityShadows_Render();
+#ifdef CC_BUILD_ESP32S3
+	holo_perf_add(HOLO_PERF_ENTITY_SHADOW,
+		Stopwatch_ElapsedMicroseconds(perfMark, Stopwatch_Measure()));
+	perfMark = Stopwatch_Measure();
+#endif
 	if (Game_SelectedPos.valid && !Game_HideGui) {
 		SelOutlineRenderer_Render(&Game_SelectedPos, true);
 	}
 #ifdef CC_BUILD_ESP32S3
-	holo_perf_add(HOLO_PERF_SHADOW_SELECTION,
+	holo_perf_add(HOLO_PERF_SELECTION,
 		Stopwatch_ElapsedMicroseconds(perfMark, Stopwatch_Measure()));
+	holo_perf_add(HOLO_PERF_SHADOW_SELECTION,
+		Stopwatch_ElapsedMicroseconds(shadowSelectionMark, Stopwatch_Measure()));
 	holo_perf_add(HOLO_PERF_SCENE_MID_MAP,
 		Stopwatch_ElapsedMicroseconds(midPerfMark, Stopwatch_Measure()));
 #endif

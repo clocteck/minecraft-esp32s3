@@ -582,7 +582,17 @@ static void Builder_DrawSprite(int x, int y, int z) {
 /*########################################################################################################################*
 *--------------------------------------------------Normal mesh builder----------------------------------------------------*
 *#########################################################################################################################*/
-static PackedCol Normal_LightColor(int x, int y, int z, Face face, BlockID block) {
+static CC_INLINE PackedCol Normal_LightColor(int x, int y, int z, Face face, BlockID block) {
+#ifdef CC_BUILD_ESP32S3
+	(void)x; (void)y; (void)z; (void)block;
+	switch (face) {
+	case FACE_XMIN: case FACE_XMAX: return Env.SunXSide;
+	case FACE_ZMIN: case FACE_ZMAX: return Env.SunZSide;
+	case FACE_YMIN: return Env.SunYMin;
+	case FACE_YMAX: return Env.SunCol;
+	}
+	return PACKEDCOL_WHITE;
+#else
 	int offset = (Blocks.LightOffset[block] >> face) & 1;
 
 	switch (face) {
@@ -601,15 +611,23 @@ static PackedCol Normal_LightColor(int x, int y, int z, Face face, BlockID block
 		return Lighting.Color_YMax_Fast(x, y + offset, z);
 	}
 	return 0; /* should never happen */
+#endif
 }
 
 static cc_bool Normal_CanStretch(BlockID initial, int chunkIndex, int x, int y, int z, Face face) {
 	BlockID cur = Builder_Chunk[chunkIndex];
 
 	if (cur != initial || Block_IsFaceHidden(cur, Builder_Chunk[chunkIndex + Builder_Offsets[face]], face)) return false;
+#ifdef CC_BUILD_ESP32S3
+	/* Coalesce equal block faces across per-cell lighting changes. The first
+	 * cell's shade is used for the full strip, trading fine shadow gradients
+	 * for substantially fewer quads on foliage-shadowed terrain. */
+	return true;
+#else
 	if (Builder_FullBright) return true;
 
 	return Normal_LightColor(Builder_X, Builder_Y, Builder_Z, face, initial) == Normal_LightColor(x, y, z, face, cur);
+#endif
 }
 
 static int NormalBuilder_StretchXLiquid(int countIndex, int x, int y, int z, int chunkIndex, BlockID block) {
@@ -675,14 +693,13 @@ static void NormalBuilder_RenderBlock(int index, int x, int y, int z) {
 
 	/* block state */
 	Vec3 min, max;
-	int baseOffset, lightFlags;
+	int baseOffset;
 	cc_bool fullBright;
 
 	/* per-face state */
 	struct Builder1DPart* part;
 	TextureLoc loc;
 	PackedCol col;
-	int offset;
 
 	if (Blocks.Draw[Builder_Block] == DRAW_SPRITE) {
 		Builder_DrawSprite(x, y, z); return;
@@ -700,7 +717,6 @@ static void NormalBuilder_RenderBlock(int index, int x, int y, int z) {
 
 	fullBright = Blocks.Brightness[Builder_Block];
 	baseOffset = (Blocks.Draw[Builder_Block] == DRAW_TRANSLUCENT) * ATLAS1D_MAX_ATLASES;
-	lightFlags = Blocks.LightOffset[Builder_Block];
 
 	Drawer.MinBB = Blocks.MinBB[Builder_Block]; Drawer.MinBB.y = 1.0f - Drawer.MinBB.y;
 	Drawer.MaxBB = Blocks.MaxBB[Builder_Block]; Drawer.MaxBB.y = 1.0f - Drawer.MaxBB.y;
@@ -714,59 +730,55 @@ static void NormalBuilder_RenderBlock(int index, int x, int y, int z) {
 
 	if (count_XMin) {
 		loc    = Block_Tex(Builder_Block, FACE_XMIN);
-		offset = (lightFlags >> FACE_XMIN) & 1;
 		part   = &Builder_Parts[baseOffset + Atlas1D_Index(loc)];
 
 		col = fullBright ? PACKEDCOL_WHITE :
-			x >= offset ? Lighting.Color_XSide_Fast(x - offset, y, z) : Env.SunXSide;
+			Normal_LightColor(x, y, z, FACE_XMIN, Builder_Block);
 		Drawer_XMin(count_XMin, col, loc, &part->faces.vertices[FACE_XMIN]);
 	}
 
 	if (count_XMax) {
 		loc    = Block_Tex(Builder_Block, FACE_XMAX);
-		offset = (lightFlags >> FACE_XMAX) & 1;
 		part   = &Builder_Parts[baseOffset + Atlas1D_Index(loc)];
 
 		col = fullBright ? PACKEDCOL_WHITE :
-			x <= (World.MaxX - offset) ? Lighting.Color_XSide_Fast(x + offset, y, z) : Env.SunXSide;
+			Normal_LightColor(x, y, z, FACE_XMAX, Builder_Block);
 		Drawer_XMax(count_XMax, col, loc, &part->faces.vertices[FACE_XMAX]);
 	}
 
 	if (count_ZMin) {
 		loc    = Block_Tex(Builder_Block, FACE_ZMIN);
-		offset = (lightFlags >> FACE_ZMIN) & 1;
 		part   = &Builder_Parts[baseOffset + Atlas1D_Index(loc)];
 
 		col = fullBright ? PACKEDCOL_WHITE :
-			z >= offset ? Lighting.Color_ZSide_Fast(x, y, z - offset) : Env.SunZSide;
+			Normal_LightColor(x, y, z, FACE_ZMIN, Builder_Block);
 		Drawer_ZMin(count_ZMin, col, loc, &part->faces.vertices[FACE_ZMIN]);
 	}
 
 	if (count_ZMax) {
 		loc    = Block_Tex(Builder_Block, FACE_ZMAX);
-		offset = (lightFlags >> FACE_ZMAX) & 1;
 		part   = &Builder_Parts[baseOffset + Atlas1D_Index(loc)];
 
 		col = fullBright ? PACKEDCOL_WHITE :
-			z <= (World.MaxZ - offset) ? Lighting.Color_ZSide_Fast(x, y, z + offset) : Env.SunZSide;
+			Normal_LightColor(x, y, z, FACE_ZMAX, Builder_Block);
 		Drawer_ZMax(count_ZMax, col, loc, &part->faces.vertices[FACE_ZMAX]);
 	}
 
 	if (count_YMin) {
 		loc    = Block_Tex(Builder_Block, FACE_YMIN);
-		offset = (lightFlags >> FACE_YMIN) & 1;
 		part   = &Builder_Parts[baseOffset + Atlas1D_Index(loc)];
 
-		col = fullBright ? PACKEDCOL_WHITE : Lighting.Color_YMin_Fast(x, y - offset, z);
+		col = fullBright ? PACKEDCOL_WHITE :
+			Normal_LightColor(x, y, z, FACE_YMIN, Builder_Block);
 		Drawer_YMin(count_YMin, col, loc, &part->faces.vertices[FACE_YMIN]);
 	}
 
 	if (count_YMax) {
 		loc    = Block_Tex(Builder_Block, FACE_YMAX);
-		offset = (lightFlags >> FACE_YMAX) & 1;
 		part   = &Builder_Parts[baseOffset + Atlas1D_Index(loc)];
 
-		col = fullBright ? PACKEDCOL_WHITE : Lighting.Color_YMax_Fast(x, y + offset, z);
+		col = fullBright ? PACKEDCOL_WHITE :
+			Normal_LightColor(x, y, z, FACE_YMAX, Builder_Block);
 		Drawer_YMax(count_YMax, col, loc, &part->faces.vertices[FACE_YMAX]);
 	}
 }

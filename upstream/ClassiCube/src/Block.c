@@ -334,8 +334,15 @@ static cc_bool Block_MightCull(BlockID block, BlockID other) {
 		&& (other == BLOCK_LAVA || other == BLOCK_STILL_LAVA))
 		return true;
 
-	/* All blocks (except for say leaves) cull with themselves */
-	if (block == other) return Blocks.Draw[block] != DRAW_TRANSPARENT_THICK;
+	/* All blocks (except for say leaves) cull with themselves. On ESP32-S3,
+	 * adjacent default leaves also share no internal face: the outer cutout
+	 * shell remains, while hidden canopy layers never enter the chunk mesh. */
+	if (block == other) {
+#ifdef CC_BUILD_ESP32S3
+		if (block == BLOCK_LEAVES) return true;
+#endif
+		return Blocks.Draw[block] != DRAW_TRANSPARENT_THICK;
+	}
 
 	/* An opaque neighbour (asides from lava) culls this block. */
 	if (Blocks.Draw[other] == DRAW_OPAQUE && !Blocks.IsLiquid[other]) return true;

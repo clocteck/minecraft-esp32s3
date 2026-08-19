@@ -171,6 +171,13 @@ static void report_window(uint64_t now_us)
     log_append_avg_ms(&line, " qDraw=", s_total.slots[HOLO_PERF_MAP_DRAW]);
     log_append_avg_ms(&line, " qSet=", s_total.slots[HOLO_PERF_MAP_SETUP]);
     log_append_avg_ms(&line, " qRast=", s_total.slots[HOLO_PERF_MAP_RASTER]);
+    log_append_avg_ms(&line, " qHiZ=", s_total.slots[HOLO_PERF_MAP_HIZ]);
+    log_append_avg_ms(&line, " qClip=", s_total.slots[HOLO_PERF_MAP_CLIP]);
+    log_append_avg_ms(&line, " qWait=", s_total.slots[HOLO_PERF_RASTER_WAIT]);
+    log_append_avg_ms(&line, " qFree=", s_total.slots[HOLO_PERF_RASTER_FREE_WAIT]);
+    log_append_avg_ms(&line, " qEnd=", s_total.slots[HOLO_PERF_RASTER_FLUSH_WAIT]);
+    log_append_avg_ms(&line, " shadow=", s_total.slots[HOLO_PERF_ENTITY_SHADOW]);
+    log_append_avg_ms(&line, " sel=", s_total.slots[HOLO_PERF_SELECTION]);
     holo_port_log(line.data);
 
     line.length = 0; line.data[0] = '\0';
@@ -209,6 +216,13 @@ static void report_window(uint64_t now_us)
     log_append_avg_count(&line, " c0Fb=", s_total.slots[HOLO_PERF_CORE0_RASTER_FALLBACKS]);
     log_append_avg_count(&line, " c0Fl=", s_total.slots[HOLO_PERF_CORE0_RASTER_FLUSHES]);
     log_append_avg_count(&line, " c0Bt=", s_total.slots[HOLO_PERF_CORE0_RASTER_BATCHES]);
+    log_append_avg_count(&line, " mN=", s_total.slots[HOLO_PERF_MAP_MODE_NONE]);
+    log_append_avg_count(&line, " mO=", s_total.slots[HOLO_PERF_MAP_MODE_OPAQUE]);
+    log_append_avg_count(&line, " mD=", s_total.slots[HOLO_PERF_MAP_MODE_DEPTH]);
+    log_append_avg_count(&line, " mH=", s_total.slots[HOLO_PERF_MAP_MODE_HALF]);
+    log_append_avg_count(&line, " hCall=", s_total.slots[HOLO_PERF_HALF_RASTER_CALLS]);
+    log_append_avg_count(&line, " c0T=", s_total.slots[HOLO_PERF_CORE0_TRANS_JOBS]);
+    log_append_avg_count(&line, " clip0=", s_total.slots[HOLO_PERF_CLIP_ZERO_MASK]);
     if (host && host->heap.free_size) {
         internal_free = host->heap.free_size(MODULE_HEAP_INTERNAL | MODULE_HEAP_8BIT);
         psram_free = host->heap.free_size(MODULE_HEAP_PSRAM | MODULE_HEAP_8BIT);
