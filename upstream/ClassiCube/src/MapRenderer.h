@@ -77,8 +77,7 @@ void MapRenderer_RenderTranslucent(float delta);
 /* NOTE: This should be called once per frame. */
 void MapRenderer_Update(float delta);
 
-/* Current radius used for chunk visibility. On constrained targets this may
-   be lower than the configured maximum while a complex view is on screen. */
+/* Current radius used for chunk visibility. */
 int MapRenderer_GetEffectiveViewDistance(void);
 
 /* Marks the given chunk as needing to be rebuilt/redrawn. */

@@ -783,15 +783,12 @@ static int renderDistSquared;
 /* Chunks past this distance are automatically unloaded */
 static int buildDistSquared;
 #ifdef CC_BUILD_ESP32S3
-#define ESP_DYNAMIC_MIN_VIEW      20
 #define ESP_PRELOAD_RING_DISTANCE CHUNK_SIZE
 #define ESP_UNLOAD_RING_DISTANCE  CHUNK_SIZE
 /* Meshes one chunk-ring beyond the visible radius avoid turn/movement holes.
  * A second ring is the eviction hysteresis, while voxel data remains in the
  * fixed classic map independently of these mesh distances. */
 static int unloadDistSquared;
-static int dynamicRenderDistance;
-static cc_uint8 dynamicCriticalFrames, dynamicSlowFrames, dynamicFastFrames;
 
 static float ChunkAabbDistSquared(const struct ChunkInfo* chunk) {
 	float dx = Math_AbsF(Camera.CurrentPos.x - chunk->centreX) - HALF_CHUNK_SIZE;
@@ -817,30 +814,14 @@ static int AdjustDist(int dist) {
 }
 
 int MapRenderer_GetEffectiveViewDistance(void) {
-#ifdef CC_BUILD_ESP32S3
-	return dynamicRenderDistance ? dynamicRenderDistance : Game_ViewDistance;
-#else
 	return Game_ViewDistance;
-#endif
 }
 
 static void CalcViewDists(void) {
 #ifdef CC_BUILD_ESP32S3
 	int buildDist  = max(Game_UserViewDistance, CHUNK_SIZE) + ESP_PRELOAD_RING_DISTANCE;
 	int unloadDist = buildDist + ESP_UNLOAD_RING_DISTANCE;
-	/* Liquid fog temporarily lowers Game_ViewDistance (lava reaches 1). Keep
-	 * that intentional cap while submerged, but do not let it become the
-	 * adaptive controller's persistent state after leaving the liquid. */
-	if (!dynamicRenderDistance) {
-		dynamicRenderDistance = Game_ViewDistance;
-	} else if (Game_ViewDistance <= ESP_DYNAMIC_MIN_VIEW) {
-		dynamicRenderDistance = Game_ViewDistance;
-	} else if (dynamicRenderDistance < ESP_DYNAMIC_MIN_VIEW) {
-		dynamicRenderDistance = min(Game_ViewDistance, ESP_DYNAMIC_MIN_VIEW);
-	} else if (dynamicRenderDistance > Game_ViewDistance) {
-		dynamicRenderDistance = Game_ViewDistance;
-	}
-	renderDistSquared = dynamicRenderDistance * dynamicRenderDistance;
+	renderDistSquared = Game_ViewDistance * Game_ViewDistance;
 	buildDistSquared  = buildDist  * buildDist;
 	unloadDistSquared = unloadDist * unloadDist;
 #else
@@ -973,66 +954,8 @@ static void UpdateMapPerfState(void) {
 #endif
 	}
 	holo_perf_set_map_state((cc_uint32)Game_ViewDistance,
-		(cc_uint32)dynamicRenderDistance,
+		(cc_uint32)Game_ViewDistance,
 		(cc_uint32)renderChunksCount, resident, pending, failed, meshVertices);
-}
-
-static void UpdateDynamicRenderDistance(float delta, int chunkUpdates) {
-	int oldDistance = dynamicRenderDistance;
-	/* The configured distance is the ceiling. Adaptation may reduce it as low
-	 * as 20 blocks, but never below either that floor or a smaller user value. */
-	int minDistance = min(Game_ViewDistance, ESP_DYNAMIC_MIN_VIEW);
-	int maxDistance = Game_ViewDistance;
-	int logValues[2];
-
-	if (Game_ViewDistance <= ESP_DYNAMIC_MIN_VIEW) {
-		dynamicRenderDistance = Game_ViewDistance;
-		renderDistSquared = dynamicRenderDistance * dynamicRenderDistance;
-		dynamicCriticalFrames = dynamicSlowFrames = dynamicFastFrames = 0;
-		return;
-	}
-
-	/* Chunk build spikes are transient and already rate limited. Count only
-	 * completed render-heavy frames, while ignoring pauses and long stalls. */
-	if (chunkUpdates || chunksNeedScan || delta <= 0.0f || delta > 0.20f) return;
-
-	if (delta > (1.0f / 9.0f) && dynamicRenderDistance > minDistance) {
-		/* Critical frames also count towards the gentler under-12 FPS path,
-		 * unless the two-frame critical path fires first. */
-		dynamicFastFrames = 0;
-		dynamicSlowFrames++;
-		if (++dynamicCriticalFrames >= 2) {
-			dynamicRenderDistance = max(minDistance, dynamicRenderDistance - 2);
-			dynamicCriticalFrames = dynamicSlowFrames = 0;
-		} else if (dynamicSlowFrames >= 8) {
-			dynamicRenderDistance = max(minDistance, dynamicRenderDistance - 1);
-			dynamicCriticalFrames = dynamicSlowFrames = 0;
-		}
-	} else if (delta > (1.0f / 12.0f) && dynamicRenderDistance > minDistance) {
-		dynamicCriticalFrames = dynamicFastFrames = 0;
-		if (++dynamicSlowFrames >= 8) {
-			dynamicRenderDistance = max(minDistance, dynamicRenderDistance - 1);
-			dynamicSlowFrames = 0;
-		}
-	} else if (delta < (1.0f / 16.0f) && dynamicRenderDistance < maxDistance) {
-		dynamicCriticalFrames = dynamicSlowFrames = 0;
-		if (++dynamicFastFrames >= 20) {
-			dynamicRenderDistance++;
-			dynamicFastFrames = 0;
-		}
-	} else {
-		dynamicCriticalFrames = dynamicSlowFrames = dynamicFastFrames = 0;
-	}
-	if (dynamicRenderDistance == oldDistance) return;
-
-	renderDistSquared = dynamicRenderDistance * dynamicRenderDistance;
-	/* Force the full visibility path next frame; a stationary-build scan only
-	 * updates dirty chunks and cannot apply a new radius to every cached mesh. */
-	lastCamPos = Vec3_BigPos();
-	chunksNeedScan = true;
-	logValues[0] = Game_ViewDistance;
-	logValues[1] = dynamicRenderDistance;
-	Platform_Log2("[cc.view] max=%i effective=%i", &logValues[0], &logValues[1]);
 }
 #endif
 
@@ -1048,14 +971,7 @@ static void UpdateChunks(float delta) {
 	p = Entities.CurPlayer;
 	samePos = Vec3_Equals(&Camera.CurrentPos, &lastCamPos)
 		&& p->Base.Pitch == lastPitch && p->Base.Yaw == lastYaw;
-	if (samePos && !chunksNeedScan) {
-#ifdef CC_BUILD_ESP32S3
-		/* Keep sampling after input stops. A costly view reached by rotating once
-		 * must still be able to shrink its effective radius while held still. */
-		UpdateDynamicRenderDistance(delta, 0);
-#endif
-		return;
-	}
+	if (samePos && !chunksNeedScan) return;
 
 	renderChunksCount = samePos ?
 		UpdateChunksStill(&chunkUpdates, &pendingBuilds) :
@@ -1070,9 +986,6 @@ static void UpdateChunks(float delta) {
 	lastYaw    = p->Base.Yaw;
 
 	if (!samePos || chunkUpdates) ResetPartFlags();
-#ifdef CC_BUILD_ESP32S3
-	UpdateDynamicRenderDistance(delta, chunkUpdates);
-#endif
 }
 
 static void SortMapChunks(int left, int right) {

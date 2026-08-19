@@ -537,6 +537,20 @@ void MenuOptionsScreen_Show(InitMenuOptions init) {
 *#########################################################################################################################*/
 enum ViewDist { VIEW_TINY, VIEW_SHORT, VIEW_NORMAL, VIEW_FAR, VIEW_COUNT };
 static const char* const viewDistNames[VIEW_COUNT] = { "TINY", "SHORT", "NORMAL", "FAR" };
+#ifdef CC_BUILD_ESP32S3
+static const int holoViewDistances[] = { 25, 30, 35 };
+static const char* const holoViewDistNames[] = { "25", "30", "35" };
+
+static int HoloViewDist_GetIndex(void) {
+	if (Game_ViewDistance >= 33) return 2;
+	if (Game_ViewDistance >= 28) return 1;
+	return 0;
+}
+
+static void HoloViewDist_SetIndex(int index) {
+	Game_UserSetViewDistance(holoViewDistances[index]);
+}
+#endif
 
 static const char* const volumeNames[] = { "OFF", "25%", "50%", "75%", "100%" };
 
@@ -566,15 +580,23 @@ static void    ClO_SetInvert(cc_bool v) {
 }
 
 static int  ClO_GetViewDist(void) {
+#ifdef CC_BUILD_ESP32S3
+	return HoloViewDist_GetIndex();
+#else
 	if (Game_ViewDistance >= 512) return VIEW_FAR;
 	if (Game_ViewDistance >= 128) return VIEW_NORMAL;
 	if (Game_ViewDistance >= 32)  return VIEW_SHORT;
 	
 	return VIEW_TINY;
+#endif
 }
 static void ClO_SetViewDist(int v) {
+#ifdef CC_BUILD_ESP32S3
+	HoloViewDist_SetIndex(v);
+#else
 	int dist = v == VIEW_FAR ? 512 : (v == VIEW_NORMAL ? 128 : (v == VIEW_SHORT ? 32 : 8));
 	Game_UserSetViewDistance(dist);
+#endif
 }
 
 static cc_bool ClO_GetAnaglyph(void) { return Game_Anaglyph3D; }
@@ -621,8 +643,13 @@ static void ClassicOptionsScreen_InitWidgets(struct MenuOptionsScreen* s) {
 			AudioOptions_GetMusic, AudioOptions_SetMusic, NULL);
 		MenuOptionsScreen_AddBool(s, "Invert mouse",
 			ClO_GetInvert,   ClO_SetInvert, NULL);
+#ifdef CC_BUILD_ESP32S3
+		MenuOptionsScreen_AddEnum(s, "Render distance", holoViewDistNames, Array_Elems(holoViewDistNames),
+			ClO_GetViewDist, ClO_SetViewDist, NULL);
+#else
 		MenuOptionsScreen_AddEnum(s, "Render distance", viewDistNames, VIEW_COUNT,
 			ClO_GetViewDist, ClO_SetViewDist, NULL);
+#endif
 		MenuOptionsScreen_AddBool(s, "3d anaglyph",
 			ClO_GetAnaglyph, ClO_SetAnaglyph, NULL);
 		
@@ -735,8 +762,13 @@ static void GrO_SetFPS(int v) {
 	Game_SetFpsLimit(v);
 }
 
+#ifdef CC_BUILD_ESP32S3
+static int  GrO_GetViewDist(void) { return HoloViewDist_GetIndex(); }
+static void GrO_SetViewDist(int v) { HoloViewDist_SetIndex(v); }
+#else
 static int  GrO_GetViewDist(void) { return Game_ViewDistance; }
 static void GrO_SetViewDist(int v) { Game_UserSetViewDistance(v); }
+#endif
 
 static cc_bool GrO_GetSmooth(void) { return Builder_SmoothLighting; }
 static void    GrO_SetSmooth(cc_bool v) {
@@ -785,9 +817,14 @@ static void GraphicsOptionsScreen_InitWidgets(struct MenuOptionsScreen* s) {
 			"&e30/60/120/144 FPS: &fRenders 30/60/120/144 frames at most each second.\n" \
 			"&eNoLimit: &fRenders as many frames as possible each second.\n" \
 			"&cNoLimit is pointless - it wastefully renders frames that you don't even see!");
+#ifdef CC_BUILD_ESP32S3
+		MenuOptionsScreen_AddEnum(s, "View distance", holoViewDistNames, Array_Elems(holoViewDistNames),
+			GrO_GetViewDist,   GrO_SetViewDist, NULL);
+#else
 		MenuOptionsScreen_AddInt(s, "View distance",
 			8, 4096, 512,
 			GrO_GetViewDist,   GrO_SetViewDist, NULL);
+#endif
 		MenuOptionsScreen_AddBool(s, "Smooth lighting",
 			GrO_GetSmooth,     GrO_SetSmooth,
 			"&eSmooth lighting smooths lighting and adds a minor glow to bright blocks.\n" \

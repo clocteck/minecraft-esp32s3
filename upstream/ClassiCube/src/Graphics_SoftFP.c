@@ -215,6 +215,13 @@ static cc_uint32 terrainTintCacheHits, terrainTintCacheMisses;
 #define SOFTFP_MAP_BATCH_HINT ((DrawHints)0x10)
 #endif
 #ifdef CC_BUILD_ESP32S3
+#ifdef CC_BUILD_ESP32S3_HOT_PROBES
+#define SOFTFP_HOT_PROBE(...) do { __VA_ARGS__; } while (0)
+#define SOFTFP_HOT_CYCLES() SoftFP_ReadCycles()
+#else
+#define SOFTFP_HOT_PROBE(...) ((void)0)
+#define SOFTFP_HOT_CYCLES() 0u
+#endif
 /* These counters reset every frame and never approach 32-bit range. Keeping
  * them 32-bit avoids thousands of emulated 64-bit increments in culling and
  * raster hot paths; holo_perf widens them only once at frame end. */
@@ -480,15 +487,13 @@ void Gfx_Create(void) {
     Gfx.BackendType  = CC_GFX_BACKEND_SOFTGPU;
     Gfx.Limitations  = GFX_LIMIT_MINIMAL;
 #if defined CC_BUILD_ESP32S3 && defined CC_BUILD_SOFTFP_W_DEPTH8
-    /* Claim the fixed-resolution Z8 block and its 2 KiB encoder table before
-     * component VBs/colour bands can fragment the internal heap. The direct
-     * opaque kernel relies on this table, so losing it is a much larger cost
-     * than the table's size would suggest. Keep raster resolution unchanged
-     * if either reservation falls back. */
+    /* The platform has already reserved the mandatory fixed-resolution Z8
+     * block before the colour stage. The 2 KiB encoder table is still
+     * optional, but the renderer must never fall back to PSRAM for Z8. */
     raster_width  = CLASSICUBE_3D_WIDTH;
     raster_height = CLASSICUBE_3D_HEIGHT;
     if (!holo_port_buffer(raster_width * raster_height * sizeof(DepthValue), 2)) {
-        Platform_LogConst("[cc.gfx] WARN: 192x144 Z8 internal reserve unavailable; using PSRAM at same resolution");
+        Process_Abort("Required internal 192x144 Z8 buffer is missing");
     }
     (void)holo_port_buffer(SOFTFP_W_DEPTH8_LUT_SIZE * sizeof(DepthValue), 6);
 #endif
@@ -537,10 +542,8 @@ void Gfx_Create(void) {
     }
 #endif
 #ifdef SOFTFP_LOWRES_COLOR_STAGE
-    rasterColorInternal[0] = (SoftPixel*)holo_port_buffer(
-        CLASSICUBE_3D_WIDTH * CLASSICUBE_COLOR_BAND_ROWS * sizeof(SoftPixel), 4);
-    rasterColorInternal[1] = (SoftPixel*)holo_port_buffer(
-        CLASSICUBE_3D_WIDTH * CLASSICUBE_COLOR_BAND_ROWS * sizeof(SoftPixel), 5);
+    rasterColorInternal[0] = (SoftPixel*)holo_port_color_band(0);
+    rasterColorInternal[1] = (SoftPixel*)holo_port_color_band(1);
 #endif
 }
 
@@ -1138,17 +1141,20 @@ typedef struct SoftFPUpscaleJob {
 
 static void SoftFP_SelectRasterSnapshot(cc_uint8 index) {
 	SoftPixel* snapshot = rasterColorSnapshots[index];
+	int bandRows = (int)holo_port_color_band_rows();
+	int psramRows = raster_height - bandRows * 2;
 	int row;
+	if (psramRows < 0) psramRows = 0;
 	rasterColorRenderIndex = index;
 	for (row = 0; row < raster_height; row++) {
-		if (row < CLASSICUBE_COLOR_PSRAM_ROWS) {
+		if (!bandRows || row < psramRows) {
 			rasterColorRows[row] = snapshot + row * raster_width;
 		} else {
-			int localRow = row - CLASSICUBE_COLOR_PSRAM_ROWS;
-			int band = localRow / CLASSICUBE_COLOR_BAND_ROWS;
+			int localRow = row - psramRows;
+			int band = localRow / bandRows;
 			SoftPixel* pixels = rasterColorInternal[band];
 			rasterColorRows[row] = pixels ?
-				pixels + (localRow % CLASSICUBE_COLOR_BAND_ROWS) * raster_width :
+				pixels + (localRow % bandRows) * raster_width :
 				snapshot + row * raster_width;
 		}
 	}
@@ -1156,13 +1162,16 @@ static void SoftFP_SelectRasterSnapshot(cc_uint8 index) {
 
 static void SoftFP_FinishRasterSnapshot(void) {
 	SoftPixel* snapshot = rasterColorSnapshots[rasterColorRenderIndex];
+	int bandRows = (int)holo_port_color_band_rows();
+	int psramRows = raster_height - bandRows * 2;
 	int band;
+	if (!bandRows) return;
+	if (psramRows < 0) psramRows = 0;
 	for (band = 0; band < 2; band++) {
 		if (!rasterColorInternal[band]) continue;
-		Mem_Copy(snapshot + (CLASSICUBE_COLOR_PSRAM_ROWS +
-			band * CLASSICUBE_COLOR_BAND_ROWS) * raster_width,
+		Mem_Copy(snapshot + (psramRows + band * bandRows) * raster_width,
 			rasterColorInternal[band],
-			CLASSICUBE_COLOR_BAND_ROWS * raster_width * sizeof(SoftPixel));
+			bandRows * raster_width * sizeof(SoftPixel));
 	}
 }
 
@@ -1292,8 +1301,8 @@ static void ClearColorBuffer(void) {
     SoftPixel fill = SoftPixel_FromBitmap(clearColor);
 
 #ifdef SOFTFP_LOWRES_COLOR_STAGE
-    /* The low-resolution stage is contiguous in either internal RAM or its
-     * PSRAM fallback. */
+    /* The row table hides whether a row lives in either independent internal
+     * colour band or in the current PSRAM snapshot. */
     for (y = 0; y < raster_height; y++) {
         target = SOFTFP_COLOR_ROW(y);
         for (x = 0; x + 3 < raster_width; x += 4) {
@@ -1339,11 +1348,12 @@ static void FillDepth32(DepthValue* dst, int count) {
 
 #ifdef CC_BUILD_ESP32S3
 static void ResetRasterFrameCounters(void) {
+    rasterTerrainQuads = 0;
+#ifdef CC_BUILD_ESP32S3_HOT_PROBES
     rasterBboxPixels = rasterSpanPixels = 0;
     rasterPerspectiveTriangles = rasterPerspectivePixels = 0;
     rasterPerspectiveReciprocals = 0;
     rasterTriangleCount = 0;
-    rasterTerrainQuads = 0;
     rasterOpaqueLutQuads = 0;
     rasterHiZCellSkipPixels = 0;
     rasterSpriteQuads = rasterSpriteCull = 0;
@@ -1369,13 +1379,14 @@ static void ResetRasterFrameCounters(void) {
     softfpRasterFallbacksFrame = 0;
     softfpRasterFlushesFrame = 0;
 #endif
-    gfx_temporal_quad_key = 0;
 #if defined CC_BUILD_SOFTFP_TEXEL_2X2 || defined CC_BUILD_SOFTFP_TERRAIN_TILE_CACHE
     textureSampleReuse = textureSampleLoads = 0;
 #endif
 #ifdef SOFTFP_FAST_TERRAIN_KERNEL
     terrainTintCacheHits = terrainTintCacheMisses = 0;
 #endif
+#endif
+    gfx_temporal_quad_key = 0;
 }
 #endif
 
@@ -3404,7 +3415,7 @@ static CC_INLINE int SoftFP_FastMapMode(void) {
 
 #ifdef CC_BUILD_ESP32S3
 static CC_NOINLINE void RasterizeTerrainOpaqueLutDirect(TerrainRasterScratch* scratch) {
-    cc_uint32 kernelStart = SoftFP_ReadCycles();
+    cc_uint32 kernelStart = SOFTFP_HOT_CYCLES();
     const DepthValue* depthLut = wDepth8EncodeLut;
     const SoftPixel* shaded = (const SoftPixel*)scratch->samplePixels;
     int rowW = scratch->rowW, rowU = scratch->rowU, rowV = scratch->rowV;
@@ -3562,9 +3573,9 @@ next_opaque_lut_pixel:
             scratch->edgeStart[i] += scratch->edgeStepY[i];
         }
     }
-    __atomic_fetch_add(&rasterSpanPixels, spanPixelsLocal, __ATOMIC_RELAXED);
-    __atomic_fetch_add(&rasterHiZCellSkipPixels, cellSkipPixelsLocal, __ATOMIC_RELAXED);
-    rasterMapRasterCycles += SoftFP_ReadCycles() - kernelStart;
+    SOFTFP_HOT_PROBE(__atomic_fetch_add(&rasterSpanPixels, spanPixelsLocal, __ATOMIC_RELAXED));
+    SOFTFP_HOT_PROBE(__atomic_fetch_add(&rasterHiZCellSkipPixels, cellSkipPixelsLocal, __ATOMIC_RELAXED));
+    SOFTFP_HOT_PROBE(rasterMapRasterCycles += SOFTFP_HOT_CYCLES() - kernelStart);
 }
 
 #ifdef CC_BUILD_SOFTFP_CORE0_RASTER
@@ -3583,14 +3594,14 @@ static void SoftFP_RasterWorkerRun(TerrainRasterScratch* scratch) {
 static cc_bool SoftFP_RasterWorkerWaitUntil(cc_uint32 target) {
     const module_host_api_v2* host = holo_port_host();
     while (__atomic_load_n(&softfpRasterCompletedSeq, __ATOMIC_ACQUIRE) < target) {
-        cc_uint32 waitStart = SoftFP_ReadCycles();
+        cc_uint32 waitStart = SOFTFP_HOT_CYCLES();
         int32_t result;
         if (!host || !host->sync.take || !softfpRasterIdle) return false;
         result = host->sync.take(softfpRasterIdle, MODULE_WAIT_FOREVER);
         {
-            cc_uint32 elapsed = SoftFP_ReadCycles() - waitStart;
-            rasterWorkerWaitCycles += elapsed;
-            rasterWorkerFlushWaitCycles += elapsed;
+            cc_uint32 elapsed = SOFTFP_HOT_CYCLES() - waitStart;
+            SOFTFP_HOT_PROBE(rasterWorkerWaitCycles += elapsed);
+            SOFTFP_HOT_PROBE(rasterWorkerFlushWaitCycles += elapsed);
         }
         if (result != MODULE_OK) return false;
     }
@@ -3762,12 +3773,12 @@ static cc_bool SoftFP_RasterWorkerQueue(const TerrainRasterScratch* scratch) {
     if (!softfpRasterTask || !host || !host->sync.take || !softfpRasterFree) return false;
 claim_buffer:
     if (!softfpRasterFillClaimed) {
-        cc_uint32 waitStart = SoftFP_ReadCycles();
+        cc_uint32 waitStart = SOFTFP_HOT_CYCLES();
         int32_t waitResult = host->sync.take(softfpRasterFree, MODULE_WAIT_FOREVER);
         {
-            cc_uint32 elapsed = SoftFP_ReadCycles() - waitStart;
-            rasterWorkerWaitCycles += elapsed;
-            rasterWorkerFreeWaitCycles += elapsed;
+            cc_uint32 elapsed = SOFTFP_HOT_CYCLES() - waitStart;
+            SOFTFP_HOT_PROBE(rasterWorkerWaitCycles += elapsed);
+            SOFTFP_HOT_PROBE(rasterWorkerFreeWaitCycles += elapsed);
         }
         if (waitResult != MODULE_OK) return false;
         index = __atomic_load_n(&softfpRasterWriteSeq, __ATOMIC_ACQUIRE) &
@@ -4123,11 +4134,11 @@ static CC_NOINLINE void RasterizeTerrainPerspectiveDirect(TerrainRasterScratch* 
             scratch->edgeStart[i] += scratch->edgeStepY[i];
         }
     }
-    __atomic_fetch_add(&rasterSpanPixels, spanPixelsLocal, __ATOMIC_RELAXED);
-    __atomic_fetch_add(&rasterPerspectiveTriangles, 1u, __ATOMIC_RELAXED);
-    __atomic_fetch_add(&rasterPerspectivePixels, spanPixelsLocal, __ATOMIC_RELAXED);
-    __atomic_fetch_add(&rasterPerspectiveReciprocals, reciprocalLocal, __ATOMIC_RELAXED);
-    __atomic_fetch_add(&rasterHiZCellSkipPixels, cellSkipPixelsLocal, __ATOMIC_RELAXED);
+    SOFTFP_HOT_PROBE(__atomic_fetch_add(&rasterSpanPixels, spanPixelsLocal, __ATOMIC_RELAXED));
+    SOFTFP_HOT_PROBE(__atomic_fetch_add(&rasterPerspectiveTriangles, 1u, __ATOMIC_RELAXED));
+    SOFTFP_HOT_PROBE(__atomic_fetch_add(&rasterPerspectivePixels, spanPixelsLocal, __ATOMIC_RELAXED));
+    SOFTFP_HOT_PROBE(__atomic_fetch_add(&rasterPerspectiveReciprocals, reciprocalLocal, __ATOMIC_RELAXED));
+    SOFTFP_HOT_PROBE(__atomic_fetch_add(&rasterHiZCellSkipPixels, cellSkipPixelsLocal, __ATOMIC_RELAXED));
 }
 
 #ifdef CC_BUILD_SOFTFP_CORE0_RASTER
@@ -4225,7 +4236,7 @@ static CC_NOINLINE void RasterizeTerrainHalfBlendDirect(TerrainRasterScratch* sc
     int firstY = scratch->minY;
     cc_uint32 spanPixelsLocal = 0;
     int i, x, y;
-    __atomic_fetch_add(&rasterHalfBlendCalls, 1u, __ATOMIC_RELAXED);
+    SOFTFP_HOT_PROBE(__atomic_fetch_add(&rasterHalfBlendCalls, 1u, __ATOMIC_RELAXED));
 
     /* Mode 1 owns even rows and mode 2 owns odd rows. This lets Core 0 and
      * Core 1 rasterise the same translucent scene concurrently without ever
@@ -4399,7 +4410,7 @@ static CC_NOINLINE void RasterizeTerrainHalfBlendDirect(TerrainRasterScratch* sc
             scratch->edgeStart[i] += scratch->edgeStepY[i] * rowAdvance;
         }
     }
-    __atomic_fetch_add(&rasterSpanPixels, spanPixelsLocal, __ATOMIC_RELAXED);
+    SOFTFP_HOT_PROBE(__atomic_fetch_add(&rasterSpanPixels, spanPixelsLocal, __ATOMIC_RELAXED));
 }
 
 #ifdef CC_BUILD_SOFTFP_CORE0_RASTER
@@ -4453,7 +4464,7 @@ static CC_NOINLINE void DrawPolygonFastTerrainAffine(VertexFixed* V0,
                                                        int area, int factor,
                                                        int mapMode,
                                                        int perspectiveShift) {
-    cc_uint32 setupStart = SoftFP_ReadCycles();
+    cc_uint32 setupStart = SOFTFP_HOT_CYCLES();
     TerrainRasterScratch* scratch = terrainRasterScratch;
     int minX, minY, maxX, maxY;
     int rasterMaxX = (fb_maxX * raster_width) / fb_width;
@@ -4621,7 +4632,7 @@ static CC_NOINLINE void DrawPolygonFastTerrainAffine(VertexFixed* V0,
     scratch->translucentRowMode = 0;
     scratch->perspectiveShift = (signed char)perspectiveShift;
     scratch->depthLutSafe = (cc_uint8)depthLutSafe;
-    rasterMapSetupCycles += SoftFP_ReadCycles() - setupStart;
+    SOFTFP_HOT_PROBE(rasterMapSetupCycles += SOFTFP_HOT_CYCLES() - setupStart);
     if (mapMode == SOFTFP_MAP_MODE_DEPTH_ONLY) {
         RasterizeTerrainDepthOnly(scratch);
     } else if (mapMode == SOFTFP_MAP_MODE_HALF_BLEND) {
@@ -6196,7 +6207,7 @@ static void ProcessClippedTriangleAndDraw(VertexFixed* inVerts, int polyCount,
 #endif
 #ifdef CC_BUILD_ESP32S3
     int perspectiveShift = -1;
-    cc_uint32 projectStart = optimizeMap ? SoftFP_ReadCycles() : 0;
+    cc_uint32 projectStart = optimizeMap ? SOFTFP_HOT_CYCLES() : 0;
 #else
     int perspectiveShift = forceAffine ? -1 : 2;
 #endif
@@ -6221,7 +6232,8 @@ static void ProcessClippedTriangleAndDraw(VertexFixed* inVerts, int polyCount,
 #endif
     }
 #ifdef CC_BUILD_ESP32S3
-    if (optimizeMap) rasterMapProjectCycles += SoftFP_ReadCycles() - projectStart;
+    if (optimizeMap) SOFTFP_HOT_PROBE(
+        rasterMapProjectCycles += SOFTFP_HOT_CYCLES() - projectStart);
 #endif
 
 #ifdef CC_BUILD_SOFTFP_PERSPECTIVE4
@@ -6245,9 +6257,9 @@ static void ProcessClippedTriangleAndDraw(VertexFixed* inVerts, int polyCount,
         VertexFixed* D = &inVerts[3];
 
         {
-        cc_uint32 hizStart = SoftFP_ReadCycles();
+        cc_uint32 hizStart = SOFTFP_HOT_CYCLES();
         cc_bool occluded = SoftFP_TerrainQuadOccluded(inVerts);
-        rasterMapHiZCycles += SoftFP_ReadCycles() - hizStart;
+        SOFTFP_HOT_PROBE(rasterMapHiZCycles += SOFTFP_HOT_CYCLES() - hizStart);
         if (occluded) {
             rasterCurrentHiZCull++;
             return;
@@ -6507,7 +6519,7 @@ static void DrawClippedFixed(VertexFixed quad[4], cc_uint32 planeMask,
         ProcessClippedTriangleAndDraw(quad, 4, optimizeMap, forceAffine);
         return;
     }
-	clipStart = SoftFP_ReadCycles();
+	clipStart = SOFTFP_HOT_CYCLES();
 
     for (i = 0; i < 4; i++) {
         cc_uint32 code = VertexClipOutcode(&quad[i], planeMask);
@@ -6515,17 +6527,17 @@ static void DrawClippedFixed(VertexFixed quad[4], cc_uint32 planeMask,
         clipAnd &= code;
     }
     if (clipAnd) {
-		rasterMapClipCycles += SoftFP_ReadCycles() - clipStart;
+		SOFTFP_HOT_PROBE(rasterMapClipCycles += SOFTFP_HOT_CYCLES() - clipStart);
 		return;
 	}
     if (!clipOr) {
-		rasterMapClipCycles += SoftFP_ReadCycles() - clipStart;
+		SOFTFP_HOT_PROBE(rasterMapClipCycles += SOFTFP_HOT_CYCLES() - clipStart);
         ProcessClippedTriangleAndDraw(quad, 4, optimizeMap, forceAffine);
         return;
     }
 
     int polyCount = ClipQuadToFrustumFixed(quad, buf1, buf2, &outPoly, clipOr);
-	rasterMapClipCycles += SoftFP_ReadCycles() - clipStart;
+	SOFTFP_HOT_PROBE(rasterMapClipCycles += SOFTFP_HOT_CYCLES() - clipStart);
     if (polyCount > 0) {
         ProcessClippedTriangleAndDraw(outPoly, polyCount, optimizeMap, forceAffine);
     }
@@ -6535,15 +6547,19 @@ void DrawQuadsFixed(int startVertex, int verticesCount, DrawHints hints) {
     VertexFixed vertices[4];
     int i, j = startVertex;
 #ifdef CC_BUILD_ESP32S3
+#ifdef CC_BUILD_ESP32S3_HOT_PROBES
     cc_uint64 perfMark = Stopwatch_Measure();
     cc_bool perfWas2D = gfx_rendering2D;
+#endif
 #ifdef CC_BUILD_SOFTFP_QUAD_FRUSTUM_CULL
     cc_uint32 spriteCullLocal = 0;
     cc_uint32 frustumCullLocal = 0, temporalCullLocal = 0;
     cc_uint32 backfaceCullLocal = 0;
     cc_uint32 frustumGroupCullLocal = 0;
 #endif
+#ifdef CC_BUILD_ESP32S3_HOT_PROBES
     holo_perf_count_quads((uint32_t)(verticesCount / 4));
+#endif
 #ifdef CC_BUILD_SOFTFP_QUAD_FRUSTUM_CULL
     if (!gfx_rendering2D && (hints & SOFTFP_MAP_BATCH_HINT) &&
         (hints & DRAW_HINT_SPRITE)) {
@@ -6600,7 +6616,7 @@ void DrawQuadsFixed(int startVertex, int verticesCount, DrawHints hints) {
             cc_uint8 quadClipPlaneMask = (cc_uint8)clipPlaneMask;
 #endif
 #ifdef CC_BUILD_ESP32S3
-            cc_uint32 mapPhaseStart = optimizeMap ? SoftFP_ReadCycles() : 0;
+            cc_uint32 mapPhaseStart = optimizeMap ? SOFTFP_HOT_CYCLES() : 0;
             cc_uint32 mapPhaseMark;
 #endif
 #ifdef CC_BUILD_SOFTFP_QUAD_FRUSTUM_CULL
@@ -6617,7 +6633,7 @@ void DrawQuadsFixed(int startVertex, int verticesCount, DrawHints hints) {
                         i += 7;
                         j += step * 7;
 #ifdef CC_BUILD_ESP32S3
-                        rasterMapCullCycles += SoftFP_ReadCycles() - mapPhaseStart;
+                        SOFTFP_HOT_PROBE(rasterMapCullCycles += SOFTFP_HOT_CYCLES() - mapPhaseStart);
 #endif
                         continue;
                     }
@@ -6628,7 +6644,7 @@ void DrawQuadsFixed(int startVertex, int verticesCount, DrawHints hints) {
                 SoftFP_MapQuadBackfacing(j)) {
                 backfaceCullLocal++;
 #ifdef CC_BUILD_ESP32S3
-                rasterMapCullCycles += SoftFP_ReadCycles() - mapPhaseStart;
+                SOFTFP_HOT_PROBE(rasterMapCullCycles += SOFTFP_HOT_CYCLES() - mapPhaseStart);
 #endif
                 continue;
             }
@@ -6638,7 +6654,7 @@ void DrawQuadsFixed(int startVertex, int verticesCount, DrawHints hints) {
 #ifdef CC_BUILD_ESP32S3
                 if (hints & DRAW_HINT_SPRITE) spriteCullLocal++;
                 frustumCullLocal++;
-                rasterMapCullCycles += SoftFP_ReadCycles() - mapPhaseStart;
+                SOFTFP_HOT_PROBE(rasterMapCullCycles += SOFTFP_HOT_CYCLES() - mapPhaseStart);
 #endif
                 continue;
             }
@@ -6648,7 +6664,7 @@ void DrawQuadsFixed(int startVertex, int verticesCount, DrawHints hints) {
                     gfx_temporal_quad_key = 0;
                     temporalCullLocal++;
 #ifdef CC_BUILD_ESP32S3
-                    rasterMapCullCycles += SoftFP_ReadCycles() - mapPhaseStart;
+                    SOFTFP_HOT_PROBE(rasterMapCullCycles += SOFTFP_HOT_CYCLES() - mapPhaseStart);
 #endif
                     continue;
                 }
@@ -6659,8 +6675,8 @@ void DrawQuadsFixed(int startVertex, int verticesCount, DrawHints hints) {
 #endif
 #ifdef CC_BUILD_ESP32S3
             if (optimizeMap) {
-                mapPhaseMark = SoftFP_ReadCycles();
-                rasterMapCullCycles += mapPhaseMark - mapPhaseStart;
+                mapPhaseMark = SOFTFP_HOT_CYCLES();
+                SOFTFP_HOT_PROBE(rasterMapCullCycles += mapPhaseMark - mapPhaseStart);
                 mapPhaseStart = mapPhaseMark;
             }
 #endif
@@ -6677,8 +6693,8 @@ void DrawQuadsFixed(int startVertex, int verticesCount, DrawHints hints) {
             }
 #ifdef CC_BUILD_ESP32S3
             if (optimizeMap) {
-                mapPhaseMark = SoftFP_ReadCycles();
-                rasterMapXformCycles += mapPhaseMark - mapPhaseStart;
+                mapPhaseMark = SOFTFP_HOT_CYCLES();
+                SOFTFP_HOT_PROBE(rasterMapXformCycles += mapPhaseMark - mapPhaseStart);
                 mapPhaseStart = mapPhaseMark;
             }
 #endif
@@ -6691,7 +6707,7 @@ void DrawQuadsFixed(int startVertex, int verticesCount, DrawHints hints) {
                              optimizeMap, forceAffine);
 #ifdef CC_BUILD_ESP32S3
             if (optimizeMap) {
-                rasterMapDrawCycles += SoftFP_ReadCycles() - mapPhaseStart;
+                SOFTFP_HOT_PROBE(rasterMapDrawCycles += SOFTFP_HOT_CYCLES() - mapPhaseStart);
             }
 #endif
 #ifdef CC_BUILD_SOFTFP_QUAD_FRUSTUM_CULL
@@ -6710,8 +6726,10 @@ void DrawQuadsFixed(int startVertex, int verticesCount, DrawHints hints) {
     rasterTemporalCull += temporalCullLocal;
     rasterFrustumGroupCull += frustumGroupCullLocal;
 #endif
+#ifdef CC_BUILD_ESP32S3_HOT_PROBES
     holo_perf_add(perfWas2D ? HOLO_PERF_DRAW2D : HOLO_PERF_DRAW3D,
                   Stopwatch_ElapsedMicroseconds(perfMark, Stopwatch_Measure()));
+#endif
 #endif
 }
 void Gfx_SetVertexFormat(VertexFormat fmt) {
@@ -6779,6 +6797,7 @@ void Gfx_EndFrame(void) {
     terrainHiZ4 = terrainHiZ4Buffers[terrainHiZBufferIndex];
     terrainHiZ  = terrainHiZBuffers[terrainHiZBufferIndex];
 #endif
+#ifdef CC_BUILD_ESP32S3_HOT_PROBES
     holo_perf_count_triangles(rasterTriangleCount);
     holo_perf_count_bbox_pixels(rasterBboxPixels);
     holo_perf_add(HOLO_PERF_RASTER_SPAN_PIXELS, rasterSpanPixels);
@@ -6836,6 +6855,7 @@ void Gfx_EndFrame(void) {
 #ifdef SOFTFP_FAST_TERRAIN_KERNEL
     holo_perf_add(HOLO_PERF_TINT_REUSE, terrainTintCacheHits);
     holo_perf_add(HOLO_PERF_TINT_LOAD, terrainTintCacheMisses);
+#endif
 #endif
 #endif
 #ifdef SOFTFP_LOWRES_COLOR_STAGE
@@ -6919,12 +6939,12 @@ void Gfx_OnWindowResize(int width, int height) {
         Platform_Log1("[cc.gfx] streamed HUD snapshots=%i bytes PSRAM", &hudBytes);
     }
     SoftFP_SelectRasterSnapshot(0);
-    if (rasterColorInternal[0] && rasterColorInternal[1]) {
-        Platform_LogConst("[cc.gfx] color=192x144 PSRAM snapshots=2 + shared lower72 internal=27648");
-    } else if (rasterColorInternal[0] || rasterColorInternal[1]) {
-        Platform_LogConst("[cc.gfx] color=192x144 PSRAM snapshots=2 + shared lower36 internal=13824");
-    } else {
-        Platform_LogConst("[cc.gfx] color=192x144 PSRAM snapshots=2; internal hot bands unavailable");
+    {
+        int colorInfo[2];
+        colorInfo[0] = (int)holo_port_color_band_rows() * 2;
+        colorInfo[1] = colorInfo[0] * raster_width * (int)sizeof(SoftPixel);
+        Platform_Log2("[cc.gfx] color=192x144 PSRAM snapshots=2 + shared lower%i internal=%i",
+                      &colorInfo[0], &colorInfo[1]);
     }
     Platform_LogConst("[cc.gfx] present=fused 192x144->320x240 in 10-row DMA bands + HUD commands; menu fallback=single native frame");
 #endif
@@ -6953,12 +6973,9 @@ void Gfx_OnWindowResize(int width, int height) {
 #ifdef CC_BUILD_SOFTFP_W_DEPTH8
     depthBuffer = (DepthValue*)holo_port_buffer(
         db_stride * db_height * sizeof(DepthValue), 2);
-    depthBufferInternal = depthBuffer != NULL;
+    depthBufferInternal = true;
     if (!depthBuffer) {
-#ifdef CC_BUILD_ESP32S3
-        Platform_LogConst("[cc.gfx] depth internal unavailable; allocating 192x144 Z8 in PSRAM");
-#endif
-        depthBuffer = Mem_Alloc(db_stride * db_height, sizeof(DepthValue), "depth buffer");
+        Process_Abort("Required internal 192x144 Z8 buffer is missing");
     }
     Mem_Set(depthBuffer, DEPTH_CLEAR_VALUE, db_stride * db_height);
 #else
@@ -6983,11 +7000,7 @@ void Gfx_OnWindowResize(int width, int height) {
     Platform_LogConst("[cc.gfx] texture=affine A1RGB555 framebuffer=RGB565 alpha=fixed50 extras=off");
 #endif
 #elif defined CC_BUILD_SOFTFP_W_DEPTH8
-    if (depthBufferInternal) {
-        Platform_LogConst("[cc.gfx] depth=reciprocal-W Z8 hybrid-linear-log internal=27648");
-    } else {
-        Platform_LogConst("[cc.gfx] depth=reciprocal-W Z8 PSRAM fallback");
-    }
+    Platform_LogConst("[cc.gfx] depth=reciprocal-W Z8 hybrid-linear-log internal=27648 mandatory");
 #ifdef CC_BUILD_SOFTFP_PERSPECTIVE4
 #ifdef CC_BUILD_ESP32S3
     Platform_LogConst("[cc.gfx] texture=PS1-affine + selective perspective/8 full-rate A1RGB555 framebuffer=RGB565");
@@ -7023,7 +7036,11 @@ void Gfx_OnWindowResize(int width, int height) {
     Platform_LogConst("[cc.gfx] raster=3D-lowres Z32 scaled UI=320x240");
 #endif
 #ifdef SOFTFP_LOWRES_COLOR_STAGE
-    Platform_LogConst("[cc.gfx] color=192x144 RGB565 snapshot-pingpong lower72-hot; fused DMA upscale+HUD");
+    {
+        int internalRows = (int)holo_port_color_band_rows() * 2;
+        Platform_Log1("[cc.gfx] color=192x144 RGB565 snapshot-pingpong lower%i-hot; fused DMA upscale+HUD",
+                      &internalRows);
+    }
 #endif
 #endif
 #ifdef CC_BUILD_SOFTFP_QUAD_FRUSTUM_CULL
@@ -7043,7 +7060,11 @@ void Gfx_OnWindowResize(int width, int height) {
     Platform_LogConst("[cc.gfx] fog=off (clear view, no per-pixel fog)");
 #endif
 #ifdef CC_BUILD_ESP32S3
-    Platform_LogConst("[cc.gfx] probes=pipeline");
+#ifdef CC_BUILD_ESP32S3_HOT_PROBES
+    Platform_LogConst("[cc.gfx] probes=pipeline hot=on");
+#else
+    Platform_LogConst("[cc.gfx] probes=coarse hot=off");
+#endif
 #endif
 
     Gfx_SetViewport(0, 0, width, height);

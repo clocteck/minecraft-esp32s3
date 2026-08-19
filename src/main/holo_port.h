@@ -11,8 +11,6 @@
 #define CLASSICUBE_RENDER_HEIGHT  240
 #define CLASSICUBE_3D_WIDTH       192
 #define CLASSICUBE_3D_HEIGHT      144
-#define CLASSICUBE_COLOR_PSRAM_ROWS 72
-#define CLASSICUBE_COLOR_BAND_ROWS  36
 #define CLASSICUBE_DMA_ROWS        10
 #define CLASSICUBE_DISPLAY_WIDTH  320
 #define CLASSICUBE_DISPLAY_HEIGHT 240
@@ -51,6 +49,8 @@ bool holo_port_display_acquire(void);
 void holo_port_display_release(void);
 void *holo_port_display_surface(void);
 void *holo_port_buffer(size_t bytes, unsigned index);
+void *holo_port_color_band(unsigned index);
+unsigned holo_port_color_band_rows(void);
 
 /* Queues a frame whose 320x240 output is produced a 10-row DMA band at a time.
  * This is used by the low-resolution renderer to fuse upscale and HUD overlay

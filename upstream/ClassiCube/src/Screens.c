@@ -120,10 +120,7 @@ static void HUDScreen_RemakeLine1(struct HUDScreen* s) {
 		String_Format1(&status, "%i vertices", &indices);
 
 #ifdef CC_BUILD_ESP32S3
-		{
-			int effectiveView = MapRenderer_GetEffectiveViewDistance();
-			String_Format2(&status, ", view %i/%i", &effectiveView, &Game_ViewDistance);
-		}
+		String_Format1(&status, ", view %i", &Game_ViewDistance);
 #endif
 
 		ping = Ping_AveragePingMS();

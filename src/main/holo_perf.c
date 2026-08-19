@@ -160,11 +160,14 @@ static void report_window(uint64_t now_us)
     log_append_avg_ms(&line, " build=", s_total.slots[HOLO_PERF_CHUNK_BUILD]);
     log_append_avg_ms(&line, " clear=", s_total.slots[HOLO_PERF_CLEAR]);
     log_append_avg_ms(&line, " scale=", s_total.slots[HOLO_PERF_UPSCALE]);
+#ifdef CC_BUILD_ESP32S3_HOT_PROBES
     log_append_avg_ms(&line, " draw3d=", s_total.slots[HOLO_PERF_DRAW3D]);
     log_append_avg_ms(&line, " draw2d=", s_total.slots[HOLO_PERF_DRAW2D]);
+#endif
     log_append_avg_ms(&line, " conv=", s_total.slots[HOLO_PERF_CONVERT]);
     log_append_avg_ms(&line, " dma=", s_total.slots[HOLO_PERF_DMA]);
     log_append_avg_ms(&line, " wait0=", s_total.slots[HOLO_PERF_ASYNC_WAIT]);
+#ifdef CC_BUILD_ESP32S3_HOT_PROBES
     log_append_avg_ms(&line, " qCull=", s_total.slots[HOLO_PERF_MAP_CULL]);
     log_append_avg_ms(&line, " qXf=", s_total.slots[HOLO_PERF_MAP_XFORM]);
     log_append_avg_ms(&line, " qProj=", s_total.slots[HOLO_PERF_MAP_PROJECT]);
@@ -176,17 +179,23 @@ static void report_window(uint64_t now_us)
     log_append_avg_ms(&line, " qWait=", s_total.slots[HOLO_PERF_RASTER_WAIT]);
     log_append_avg_ms(&line, " qFree=", s_total.slots[HOLO_PERF_RASTER_FREE_WAIT]);
     log_append_avg_ms(&line, " qEnd=", s_total.slots[HOLO_PERF_RASTER_FLUSH_WAIT]);
+#endif
     log_append_avg_ms(&line, " shadow=", s_total.slots[HOLO_PERF_ENTITY_SHADOW]);
     log_append_avg_ms(&line, " sel=", s_total.slots[HOLO_PERF_SELECTION]);
     holo_port_log(line.data);
 
     line.length = 0; line.data[0] = '\0';
-    log_append_text(&line, "[cc.perf.work]");
+    log_append_text(&line,
+#ifdef CC_BUILD_ESP32S3_HOT_PROBES
+        "[cc.perf.work]"
+#else
+        "[cc.perf.mem]"
+#endif
+    );
+#ifdef CC_BUILD_ESP32S3_HOT_PROBES
     log_append_avg_count(&line, " quad=", s_total.quads);
     log_append_avg_count(&line, " tri=", s_total.triangles);
     log_append_avg_count(&line, " bboxpx=", s_total.bbox_pixels);
-    log_append_avg_count(&line, " chunks=", s_total.chunk_builds);
-    log_append_avg_count(&line, " dmaN=", s_total.dma_submits);
     log_append_avg_count(&line, " spanpx=", s_total.slots[HOLO_PERF_RASTER_SPAN_PIXELS]);
     log_append_avg_count(&line, " texHit=", s_total.slots[HOLO_PERF_TEXTURE_REUSE]);
     log_append_avg_count(&line, " texMiss=", s_total.slots[HOLO_PERF_TEXTURE_LOAD]);
@@ -223,6 +232,9 @@ static void report_window(uint64_t now_us)
     log_append_avg_count(&line, " hCall=", s_total.slots[HOLO_PERF_HALF_RASTER_CALLS]);
     log_append_avg_count(&line, " c0T=", s_total.slots[HOLO_PERF_CORE0_TRANS_JOBS]);
     log_append_avg_count(&line, " clip0=", s_total.slots[HOLO_PERF_CLIP_ZERO_MASK]);
+#endif
+    log_append_avg_count(&line, " chunks=", s_total.chunk_builds);
+    log_append_avg_count(&line, " dmaN=", s_total.dma_submits);
     if (host && host->heap.free_size) {
         internal_free = host->heap.free_size(MODULE_HEAP_INTERNAL | MODULE_HEAP_8BIT);
         psram_free = host->heap.free_size(MODULE_HEAP_PSRAM | MODULE_HEAP_8BIT);

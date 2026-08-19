@@ -59,7 +59,14 @@ cc_bool Game_SimpleArmsAnim;
 static float gfx_minFrameMs;
 static cc_bool autoPause;
 #ifdef CC_BUILD_ESP32S3
-#define HOLO_MAX_VIEW_DISTANCE 32
+#define HOLO_DEFAULT_VIEW_DISTANCE 30
+#define HOLO_MAX_VIEW_DISTANCE     35
+
+static int Holo_NormalizeViewDistance(int distance) {
+	if (distance <= 27) return 25;
+	if (distance <= 32) return 30;
+	return 35;
+}
 #endif
 
 cc_bool Game_ClassicMode, Game_ClassicHacks;
@@ -204,6 +211,9 @@ void Game_SetViewDistance(int distance) {
 }
 
 void Game_UserSetViewDistance(int distance) {
+#ifdef CC_BUILD_ESP32S3
+	distance = Holo_NormalizeViewDistance(distance);
+#endif
 	Game_UserViewDistance = distance;
 	Options_SetInt(OPT_VIEW_DISTANCE, distance);
 	Game_SetViewDistance(distance);
@@ -381,11 +391,10 @@ static void LoadOptions(void) {
 	Game_AllowServerTextures = !Game_ClassicMode && Options_GetBool(OPT_SERVER_TEXTURES,    true);
 
 #ifdef CC_BUILD_ESP32S3
-	/* 32 blocks is the upper gameplay/cache budget on this target. The map
-	 * renderer adapts the effective radius down to its 20-block floor. */
+	/* The ESP32-S3 UI exposes only the three profiled fixed-distance tiers. */
 	Game_MaxViewDistance  = HOLO_MAX_VIEW_DISTANCE;
-	Game_ViewDistance     = Options_GetInt(OPT_VIEW_DISTANCE, 4,
-		HOLO_MAX_VIEW_DISTANCE, HOLO_MAX_VIEW_DISTANCE);
+	Game_ViewDistance     = Holo_NormalizeViewDistance(Options_GetInt(
+		OPT_VIEW_DISTANCE, 25, HOLO_MAX_VIEW_DISTANCE, HOLO_DEFAULT_VIEW_DISTANCE));
 #else
 	Game_ViewDistance     = Options_GetInt(OPT_VIEW_DISTANCE, 8, 4096, DEFAULT_VIEWDIST);
 #endif

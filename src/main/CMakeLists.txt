@@ -24,6 +24,11 @@ if(CLASSICUBE_ENABLE_SCREENSHOTS)
     target_compile_definitions(${COMPONENT_LIB} PRIVATE CC_BUILD_ESP32S3_SCREENSHOTS=1)
 endif()
 
+option(CLASSICUBE_ENABLE_HOT_PROBES "Enable per-quad and raster hot-path probes" OFF)
+if(CLASSICUBE_ENABLE_HOT_PROBES)
+    target_compile_definitions(${COMPONENT_LIB} PRIVATE CC_BUILD_ESP32S3_HOT_PROBES=1)
+endif()
+
 target_compile_options(${COMPONENT_LIB} PRIVATE
     -O2
     -fPIC

@@ -123,6 +123,11 @@ static cc_bool StartPresentWorker(void)
     s_present_task = task;
     s_core1_yield_count = 0;
     holo_port_log("[cc.present] worker=Core0 prio4 stack=4096 internal; Core1 idle yield=1ms/8 full frames");
+    if (host->display.setAddrWindow && host->display.pushPixelsDMA) {
+        holo_port_log("[cc.present] DMA=fixed 320x240 window + sequential pushPixelsDMA bands");
+    } else {
+        holo_port_log("[cc.present] DMA=per-band pushImageDMA compatibility fallback");
+    }
     return true;
 }
 
@@ -284,6 +289,7 @@ static cc_bool PresentComposed(void *context, HoloPresentBandFn compose,
     const module_host_api_v2 *host = s_window_host;
     void *surface = holo_port_display_surface();
     uint16_t *dma[2];
+    cc_bool continuous;
     int y;
     uint64_t started;
     uint64_t convert_total = 0, dma_total = 0;
@@ -292,7 +298,9 @@ static cc_bool PresentComposed(void *context, HoloPresentBandFn compose,
     if (dma_us) *dma_us = 0;
     if (dma_submits) *dma_submits = 0;
     if (!host || !surface || !context || !compose || !host->display.startWrite ||
-        !host->display.pushImageDMA || !host->display.endWrite) return false;
+        !host->display.endWrite) return false;
+    continuous = host->display.setAddrWindow && host->display.pushPixelsDMA;
+    if (!continuous && !host->display.pushImageDMA) return false;
     dma[0] = (uint16_t *)holo_port_buffer(
         CLASSICUBE_DISPLAY_WIDTH * CLASSICUBE_DMA_ROWS * sizeof(uint16_t), 0);
     dma[1] = (uint16_t *)holo_port_buffer(
@@ -306,17 +314,33 @@ static cc_bool PresentComposed(void *context, HoloPresentBandFn compose,
     }
     dma_total += holo_perf_now_us() - started;
 
+    if (continuous) {
+        started = holo_perf_now_us();
+        if (host->display.setAddrWindow(surface, 0, 0, CLASSICUBE_DISPLAY_WIDTH,
+                                        CLASSICUBE_RENDER_HEIGHT) != MODULE_OK) {
+            (void)host->display.endWrite(surface);
+            holo_port_set_last_error("RGB565 full-frame DMA window failed");
+            return false;
+        }
+        dma_total += holo_perf_now_us() - started;
+    }
+
     for (y = 0; y < CLASSICUBE_RENDER_HEIGHT; y += CLASSICUBE_DMA_ROWS) {
         uint16_t *block = dma[(y / CLASSICUBE_DMA_ROWS) & 1];
         int rows = min(CLASSICUBE_DMA_ROWS, CLASSICUBE_RENDER_HEIGHT - y);
+        int32_t result;
         started = holo_perf_now_us();
         compose(context, block, y, rows);
         convert_total += holo_perf_now_us() - started;
         started = holo_perf_now_us();
-        if (host->display.pushImageDMA(surface, 0, (int16_t)y, CLASSICUBE_DISPLAY_WIDTH,
-                                       (uint16_t)rows, block) != MODULE_OK) {
+        result = continuous
+            ? host->display.pushPixelsDMA(surface, block,
+                (size_t)CLASSICUBE_DISPLAY_WIDTH * (size_t)rows)
+            : host->display.pushImageDMA(surface, 0, (int16_t)y,
+                CLASSICUBE_DISPLAY_WIDTH, (uint16_t)rows, block);
+        if (result != MODULE_OK) {
             (void)host->display.endWrite(surface);
-            holo_port_set_last_error("RGB565 DMA push failed");
+            holo_port_set_last_error("RGB565 DMA band push failed");
             return false;
         }
         dma_total += holo_perf_now_us() - started;
