@@ -15,6 +15,7 @@
 #include "holo_perf.h"
 #include "holo_port.h"
 #include "Platform.h"
+#include "Gui.h"
 #if defined(__GNUC__)
 #pragma GCC optimize ("O3")
 #endif
@@ -162,9 +163,9 @@ static cc_uint32 raster_to_color_rowh[CLASSICUBE_3D_HEIGHT];
 #define SOFTFP_GROUPED_RASTER
 #if defined CC_BUILD_ESP32S3 && defined CC_BUILD_SOFTFP_FB16
 #define SOFTFP_LOWRES_COLOR_STAGE
-static SoftPixel* rasterColorBuffer;
+static SoftPixel* rasterColorSnapshots[2];
+static cc_uint8 rasterColorRenderIndex;
 static SoftPixel* rasterColorInternal[2];
-static SoftPixel* rasterColorFallback[2];
 static SoftPixel* rasterColorRowsFallback[CLASSICUBE_3D_HEIGHT];
 static SoftPixel** rasterColorRows = rasterColorRowsFallback;
 #define SOFTFP_COLOR_ROW(y) rasterColorRows[(y)]
@@ -545,6 +546,9 @@ void Gfx_Create(void) {
 
 #ifdef CC_BUILD_ESP32S3
 static void SoftFP_HotbarCacheFree(void);
+#ifdef SOFTFP_LOWRES_COLOR_STAGE
+static void SoftFP_HudFramesFree(void);
+#endif
 #endif
 
 static void DestroyBuffers(void) {
@@ -553,11 +557,10 @@ static void DestroyBuffers(void) {
     SoftFP_HotbarCacheFree();
 #endif
 #ifdef SOFTFP_LOWRES_COLOR_STAGE
-    Mem_Free(rasterColorBuffer);
-    Mem_Free(rasterColorFallback[0]);
-    Mem_Free(rasterColorFallback[1]);
-    rasterColorBuffer = NULL;
-    rasterColorFallback[0] = rasterColorFallback[1] = NULL;
+    Mem_Free(rasterColorSnapshots[0]);
+    Mem_Free(rasterColorSnapshots[1]);
+    rasterColorSnapshots[0] = rasterColorSnapshots[1] = NULL;
+    SoftFP_HudFramesFree();
 #endif
 #ifdef CC_BUILD_SOFTFP_W_DEPTH8
     if (depthBuffer && !depthBufferInternal) Mem_Free(depthBuffer);
@@ -655,12 +658,52 @@ static CCTexture* hotbarCacheTexture;
 static cc_bool hotbarCacheValid, hotbarCacheCapturing;
 static cc_bool hotbarCacheOverflow, hotbarCacheMixedTextures, hotbarCacheLogged;
 
+#ifdef SOFTFP_LOWRES_COLOR_STAGE
+#define SOFTFP_HUD_MAX_COMMANDS 64u
+#define SOFTFP_HUD_COMMAND_QUAD   1u
+#define SOFTFP_HUD_COMMAND_PIXELS 2u
+typedef struct SoftFPHudCommand {
+    cc_uint8 type, format, alphaBlend, alphaTest;
+    VertexFixed vertices[4];
+    const SoftTexel* texturePixels;
+    int textureWidth, textureHeight;
+    int textureWidthMask, textureHeightMask;
+    const SoftFPHotbarCacheEntry* cachedPixels;
+    cc_uint32 cachedPixelCount;
+    DrawHints hints;
+} SoftFPHudCommand;
+
+typedef struct SoftFPHudFrame {
+    SoftPixel* scene;
+    cc_uint16 commandCount;
+    cc_uint8 overflow;
+    SoftFPHudCommand commands[SOFTFP_HUD_MAX_COMMANDS];
+} SoftFPHudFrame;
+
+static SoftFPHudFrame* softfpHudFrames;
+static cc_bool softfpHudCapturing, softfpStreamPresent;
+
+static cc_bool SoftFP_HudCaptureCachedPixels(
+    const SoftFPHotbarCacheEntry* entries, cc_uint32 count);
+static void SoftFP_HudForceFallback(void);
+static void SoftFP_HudComposeBand(void* context, cc_uint16* dst,
+                                  int dstY, int rows);
+#endif
+
 static void SoftFP_HotbarCacheFree(void) {
     Mem_Free(hotbarCacheEntries);
     hotbarCacheEntries = NULL;
     hotbarCacheCount = 0;
     hotbarCacheValid = hotbarCacheCapturing = false;
 }
+
+#ifdef SOFTFP_LOWRES_COLOR_STAGE
+static void SoftFP_HudFramesFree(void) {
+    Mem_Free(softfpHudFrames);
+    softfpHudFrames = NULL;
+    softfpHudCapturing = softfpStreamPresent = false;
+}
+#endif
 #endif
 static int texWidthMask, texHeightMask;
 static int texSinglePixel;
@@ -887,6 +930,11 @@ void Gfx_HotbarCacheInvalidate(void) { hotbarCacheValid = false; }
 cc_bool Gfx_HotbarCacheReplay(void) {
     cc_uint32 i;
     if (!hotbarCacheValid || hotbarCacheCapturing || !hotbarCacheEntries) return false;
+#ifdef SOFTFP_LOWRES_COLOR_STAGE
+    if (softfpHudCapturing) {
+        return SoftFP_HudCaptureCachedPixels(hotbarCacheEntries, hotbarCacheCount);
+    }
+#endif
     for (i = 0; i < hotbarCacheCount; i++) {
         const SoftFPHotbarCacheEntry* entry = &hotbarCacheEntries[i];
         colorBuffer[entry->index] = entry->color;
@@ -896,6 +944,13 @@ cc_bool Gfx_HotbarCacheReplay(void) {
 
 cc_bool Gfx_HotbarCacheBegin(void) {
     if (hotbarCacheValid || hotbarCacheCapturing) return false;
+#ifdef SOFTFP_LOWRES_COLOR_STAGE
+    /* Building the isometric cache depends on the normal 2D rasterizer writing
+     * actual pixels. Pay for one compatibility frame after invalidation, then
+     * subsequent frames can reference the compact opaque-write cache. */
+    if (softfpHudCapturing) SoftFP_HudForceFallback();
+    holo_window_wait_present();
+#endif
     if (!hotbarCacheEntries) {
         hotbarCacheEntries = (SoftFPHotbarCacheEntry*)Mem_TryAlloc(
             SOFTFP_HOTBAR_CACHE_ENTRIES, sizeof(SoftFPHotbarCacheEntry));
@@ -915,6 +970,17 @@ void Gfx_HotbarCacheEnd(void) {
     if (!hotbarCacheCapturing) return;
     hotbarCacheCapturing = false;
     hotbarCacheValid = hotbarCacheCount != 0 && !hotbarCacheOverflow;
+#ifdef SOFTFP_LOWRES_COLOR_STAGE
+    if (softfpHudCapturing) {
+        if (hotbarCacheValid) {
+            if (!SoftFP_HudCaptureCachedPixels(hotbarCacheEntries, hotbarCacheCount)) {
+                SoftFP_HudForceFallback();
+            }
+        } else {
+            SoftFP_HudForceFallback();
+        }
+    }
+#endif
     if (!hotbarCacheLogged) {
         hotbarCacheLogged = true;
         value = (int)hotbarCacheCount;
@@ -971,6 +1037,9 @@ static void SoftFP_HotbarCacheTextureUpdated(CCTexture* texture,
         
 void Gfx_DeleteTexture(GfxResourceID* texId) {
     GfxResourceID data = *texId;
+#ifdef SOFTFP_LOWRES_COLOR_STAGE
+    if (data) holo_window_wait_present();
+#endif
 #ifdef CC_BUILD_ESP32S3
     if (hotbarCacheValid && (hotbarCacheMixedTextures ||
         (CCTexture*)data == hotbarCacheTexture)) hotbarCacheValid = false;
@@ -1023,6 +1092,12 @@ GfxResourceID Gfx_AllocTexture(struct Bitmap* bmp, int rowWidth, cc_uint8 flags,
 void Gfx_UpdateTexture(GfxResourceID texId, int x, int y, struct Bitmap* part, int rowWidth, cc_bool mipmaps) {
     CCTexture* tex = (CCTexture*)texId;
 	int xx, yy;
+#ifdef SOFTFP_LOWRES_COLOR_STAGE
+    /* Terrain animation updates do not race the HUD because hotbar blocks are
+     * snapshotted as final RGB565 writes. Other mutable UI textures are rare;
+     * wait before changing one that an outstanding HUD command may reference. */
+    if (tex != hotbarCacheTexture) holo_window_wait_present();
+#endif
 #ifdef CC_BUILD_ESP32S3
     SoftFP_HotbarCacheTextureUpdated(tex, y / TERRAIN_TILE_SIZE,
         (y + part->height - 1) / TERRAIN_TILE_SIZE);
@@ -1060,6 +1135,36 @@ void Gfx_DisableMipmaps(void) { }
 typedef struct SoftFPUpscaleJob {
 	int firstRow, lastRow;
 } SoftFPUpscaleJob;
+
+static void SoftFP_SelectRasterSnapshot(cc_uint8 index) {
+	SoftPixel* snapshot = rasterColorSnapshots[index];
+	int row;
+	rasterColorRenderIndex = index;
+	for (row = 0; row < raster_height; row++) {
+		if (row < CLASSICUBE_COLOR_PSRAM_ROWS) {
+			rasterColorRows[row] = snapshot + row * raster_width;
+		} else {
+			int localRow = row - CLASSICUBE_COLOR_PSRAM_ROWS;
+			int band = localRow / CLASSICUBE_COLOR_BAND_ROWS;
+			SoftPixel* pixels = rasterColorInternal[band];
+			rasterColorRows[row] = pixels ?
+				pixels + (localRow % CLASSICUBE_COLOR_BAND_ROWS) * raster_width :
+				snapshot + row * raster_width;
+		}
+	}
+}
+
+static void SoftFP_FinishRasterSnapshot(void) {
+	SoftPixel* snapshot = rasterColorSnapshots[rasterColorRenderIndex];
+	int band;
+	for (band = 0; band < 2; band++) {
+		if (!rasterColorInternal[band]) continue;
+		Mem_Copy(snapshot + (CLASSICUBE_COLOR_PSRAM_ROWS +
+			band * CLASSICUBE_COLOR_BAND_ROWS) * raster_width,
+			rasterColorInternal[band],
+			CLASSICUBE_COLOR_BAND_ROWS * raster_width * sizeof(SoftPixel));
+	}
+}
 
 static void ScaleRasterRows(void* arg) {
 	const SoftFPUpscaleJob* job = (const SoftFPUpscaleJob*)arg;
@@ -1102,17 +1207,31 @@ static void ScaleRasterRows(void* arg) {
 	}
 }
 
+static void SoftFP_ScaleFullRaster(void) {
+    cc_uint64 upscaleMark = Stopwatch_Measure();
+    SoftFPUpscaleJob job;
+    job.firstRow = 0;
+    job.lastRow  = raster_height;
+    ScaleRasterRows(&job);
+    holo_perf_add(HOLO_PERF_UPSCALE,
+        Stopwatch_ElapsedMicroseconds(upscaleMark, Stopwatch_Measure()));
+}
+
 #endif
 
 void Gfx_Begin2D(int width, int height) {
 #ifdef SOFTFP_LOWRES_COLOR_STAGE
-	cc_uint64 upscaleMark = Stopwatch_Measure();
-	SoftFPUpscaleJob job;
-	job.firstRow = 0;
-	job.lastRow  = raster_height;
-	ScaleRasterRows(&job);
-	holo_perf_add(HOLO_PERF_UPSCALE,
-		Stopwatch_ElapsedMicroseconds(upscaleMark, Stopwatch_Measure()));
+	softfpStreamPresent = softfpHudFrames && rasterColorSnapshots[0] &&
+		rasterColorSnapshots[1] && !Gui.InputGrab && !Gui_GetBlocksWorld();
+	softfpHudCapturing = softfpStreamPresent;
+	if (softfpStreamPresent) {
+		SoftFPHudFrame* frame = &softfpHudFrames[rasterColorRenderIndex];
+		frame->scene = rasterColorSnapshots[rasterColorRenderIndex];
+		frame->commandCount = 0;
+		frame->overflow = 0;
+	} else {
+		SoftFP_ScaleFullRaster();
+	}
 #endif
 	gfx_rendering2D = true;
 
@@ -1122,6 +1241,9 @@ void Gfx_Begin2D(int width, int height) {
 }
 
 void Gfx_End2D(void) {
+#ifdef SOFTFP_LOWRES_COLOR_STAGE
+	softfpHudCapturing = false;
+#endif
 	gfx_rendering2D = false;
 
 	Gfx_SetDepthTest(true);
@@ -3585,11 +3707,11 @@ static cc_bool SoftFP_RasterWorkerStart(void) {
     __atomic_store_n(&softfpRasterCompletedSeq, 0u, __ATOMIC_RELEASE);
     softfpRasterStop = 0;
     result = host->task.create_ex("cc_raster", SoftFP_RasterWorkerTask, NULL,
-                                 SOFTFP_RASTER_STACK_BYTES, 4u, 0,
+                                 SOFTFP_RASTER_STACK_BYTES, 5u, 0,
                                  MODULE_HEAP_PSRAM | MODULE_HEAP_8BIT, &task);
     if (result != MODULE_OK || !task) goto fail;
     softfpRasterTask = task;
-    Platform_LogConst("[cc.raster] Core0 ordered ring=4 batch32 prio4 stack=6144 PSRAM exact-Z8");
+    Platform_LogConst("[cc.raster] Core0 ordered ring=4 batch32 prio5 stack=6144 PSRAM exact-Z8");
     return true;
 
 fail:
@@ -4351,7 +4473,7 @@ static CC_NOINLINE void DrawPolygonFastTerrainAffine(VertexFixed* V0,
     const TerrainTintTable* tintTable = NULL;
     cc_uint16* samplePixels = (cc_uint16*)curTexPixels;
     int sampleHeightMask = texHeightMask;
-    cc_bool shadedOpaque = false;
+    cc_bool shadedOpaque = false, depthLutSafe;
     int sampleX, sampleY, bc0, bc1, bc2;
     int ic0, ic1, ic2;
     int i;
@@ -4388,6 +4510,8 @@ static CC_NOINLINE void DrawPolygonFastTerrainAffine(VertexFixed* V0,
     }
     fogLevel = mapMode == SOFTFP_MAP_MODE_OPAQUE ?
         SoftFP_SelectTerrainFogLevel((minFogW >> 1) + (maxFogW >> 1)) : 0;
+    depthLutSafe = wDepth8EncodeLut && minFogW > 0 &&
+        (cc_uint32)maxFogW <= ((SOFTFP_W_DEPTH8_LUT_SIZE - 32u) << 8);
 
     if (mapMode != SOFTFP_MAP_MODE_DEPTH_ONLY) {
         tintTable = TerrainTintCache_Get(r1, g1, b1);
@@ -4399,15 +4523,6 @@ static CC_NOINLINE void DrawPolygonFastTerrainAffine(VertexFixed* V0,
     v1 = (int)((cc_uint32)V1->v * (cc_uint32)curTexHeight);
     u2 = (int)((cc_uint32)V2->u * (cc_uint32)curTexWidth);
     v2 = (int)((cc_uint32)V2->v * (cc_uint32)curTexHeight);
-#ifdef CC_BUILD_SOFTFP_PERSPECTIVE4
-    if (perspectiveShift >= 0) {
-        u0 = FixedMul(u0, w0); v0 = FixedMul(v0, w0);
-        u1 = FixedMul(u1, w1); v1 = FixedMul(v1, w1);
-        u2 = FixedMul(u2, w2); v2 = FixedMul(v2, w2);
-    }
-#else
-    perspectiveShift = -1;
-#endif
 
 #ifdef CC_BUILD_SOFTFP_TERRAIN_TILE_CACHE
     if (mapMode != SOFTFP_MAP_MODE_DEPTH_ONLY) {
@@ -4431,6 +4546,24 @@ static CC_NOINLINE void DrawPolygonFastTerrainAffine(VertexFixed* V0,
         }
     }
     }
+#endif
+
+#ifdef CC_BUILD_SOFTFP_PERSPECTIVE4
+    /* Perspective rows interpolate U/W and V/W. Convert the raw affine UVs
+     * only after the shaded-tile lookup proves this polygon will actually use
+     * the perspective kernel. Alpha-cutout flowers/leaves and any unsafe-depth
+     * fallback must retain their original UVs for RasterizeTerrainAffine. */
+    if (perspectiveShift >= 0 &&
+        (mapMode != SOFTFP_MAP_MODE_OPAQUE || !shadedOpaque || !depthLutSafe)) {
+        perspectiveShift = -1;
+    }
+    if (perspectiveShift >= 0) {
+        u0 = FixedMul(u0, w0); v0 = FixedMul(v0, w0);
+        u1 = FixedMul(u1, w1); v1 = FixedMul(v1, w1);
+        u2 = FixedMul(u2, w2); v2 = FixedMul(v2, w2);
+    }
+#else
+    perspectiveShift = -1;
 #endif
 
     sampleX = (minX << SOFTFP_RASTER_FP_SHIFT) + (SOFTFP_RASTER_FP_ONE >> 1);
@@ -4487,8 +4620,7 @@ static CC_NOINLINE void DrawPolygonFastTerrainAffine(VertexFixed* V0,
     scratch->blendDepthWrite = (cc_uint8)depthWrite;
     scratch->translucentRowMode = 0;
     scratch->perspectiveShift = (signed char)perspectiveShift;
-    scratch->depthLutSafe = wDepth8EncodeLut && minFogW > 0 &&
-        (cc_uint32)maxFogW <= ((SOFTFP_W_DEPTH8_LUT_SIZE - 32u) << 8);
+    scratch->depthLutSafe = (cc_uint8)depthLutSafe;
     rasterMapSetupCycles += SoftFP_ReadCycles() - setupStart;
     if (mapMode == SOFTFP_MAP_MODE_DEPTH_ONLY) {
         RasterizeTerrainDepthOnly(scratch);
@@ -5722,6 +5854,336 @@ static void DrawTriangle2D(VertexFixed* V0, VertexFixed* V1, VertexFixed* V2) {
     }
 }
 
+#ifdef SOFTFP_LOWRES_COLOR_STAGE
+static SoftFPHudFrame* SoftFP_HudCurrentFrame(void) {
+    if (!softfpHudFrames) return NULL;
+    return &softfpHudFrames[rasterColorRenderIndex];
+}
+
+static SoftFPHudCommand* SoftFP_HudNextCommand(void) {
+    SoftFPHudFrame* frame = SoftFP_HudCurrentFrame();
+    if (!frame || frame->commandCount >= SOFTFP_HUD_MAX_COMMANDS) {
+        if (frame) frame->overflow = 1;
+        return NULL;
+    }
+    return &frame->commands[frame->commandCount++];
+}
+
+static cc_bool SoftFP_HudCaptureQuad(const VertexFixed vertices[4], DrawHints hints) {
+    SoftFPHudCommand* command = SoftFP_HudNextCommand();
+    int i;
+    if (!command) {
+        SoftFP_HudForceFallback();
+        return false;
+    }
+    Mem_Set(command, 0, sizeof(*command));
+    command->type       = SOFTFP_HUD_COMMAND_QUAD;
+    command->format     = (cc_uint8)gfx_format;
+    command->alphaBlend = (cc_uint8)gfx_alphaBlend;
+    command->alphaTest  = (cc_uint8)gfx_alphaTest;
+    command->hints      = hints;
+    command->texturePixels     = curTexPixels;
+    command->textureWidth      = curTexWidth;
+    command->textureHeight     = curTexHeight;
+    command->textureWidthMask  = texWidthMask;
+    command->textureHeightMask = texHeightMask;
+    for (i = 0; i < 4; i++) command->vertices[i] = vertices[i];
+    if (hints & (DRAW_HINT_SPRITE | DRAW_HINT_RECT)) {
+        int minX = max(FixedToInt(vertices[0].x), 0);
+        int minY = max(FixedToInt(vertices[0].y), 0);
+        int maxX = min(FixedToInt(vertices[1].x), fb_maxX);
+        int maxY = min(FixedToInt(vertices[2].y), fb_maxY);
+        int width = FixedToInt(vertices[1].x) - FixedToInt(vertices[0].x);
+        int height = FixedToInt(vertices[2].y) - FixedToInt(vertices[0].y);
+        int begTX, begTY, delTX, delTY;
+        if (!width) width = 1;
+        if (!height) height = 1;
+        if (minX <= maxX && minY <= maxY) {
+            rasterUiSpritePixels += (cc_uint32)(maxX - minX + 1) *
+                                    (cc_uint32)(maxY - minY + 1);
+        }
+        begTX = FixedMul(vertices[0].u, IntToFixed(curTexWidth)) >> FP_SHIFT;
+        begTY = FixedMul(vertices[0].v, IntToFixed(curTexHeight)) >> FP_SHIFT;
+        delTX = (FixedMul(vertices[1].u, IntToFixed(curTexWidth)) >> FP_SHIFT) - begTX;
+        delTY = (FixedMul(vertices[2].v, IntToFixed(curTexHeight)) >> FP_SHIFT) - begTY;
+        if (delTX == width && delTY == height && begTX >= 0 && begTY >= 0 &&
+            begTX + delTX < curTexWidth && begTY + delTY < curTexHeight) {
+            rasterUiFastSprites++;
+        } else {
+            rasterUiGenericSprites++;
+        }
+    }
+    return true;
+}
+
+static cc_bool SoftFP_HudCaptureCachedPixels(
+    const SoftFPHotbarCacheEntry* entries, cc_uint32 count) {
+    SoftFPHudFrame* frame = SoftFP_HudCurrentFrame();
+    SoftFPHudCommand* command;
+    if (!softfpHudCapturing || !frame || !entries || !count) return false;
+    command = SoftFP_HudNextCommand();
+    if (!command) {
+        SoftFP_HudForceFallback();
+        return false;
+    }
+    Mem_Set(command, 0, sizeof(*command));
+    command->type = SOFTFP_HUD_COMMAND_PIXELS;
+    command->cachedPixels = entries;
+    command->cachedPixelCount = count;
+    return true;
+}
+
+static CC_INLINE void SoftFP_ScaleRow192To320(const SoftPixel* src,
+                                               SoftPixel* dst) {
+    const cc_uint32* in = (const cc_uint32*)src;
+    cc_uint32* out = (cc_uint32*)dst;
+    int x;
+    /* Preserve the renderer's existing centre-biased nearest-neighbour map:
+     * A B C D E F -> A B B C C D E E F F. */
+    for (x = 0; x < CLASSICUBE_3D_WIDTH; x += 6, in += 3, out += 5) {
+        cc_uint32 p0 = in[0], p2 = in[1], c45 = in[2];
+        cc_uint32 c1 = p0 >> 16, c2 = p2 & 0xFFFFu;
+        cc_uint32 c4 = c45 & 0xFFFFu, c5 = c45 >> 16;
+        out[0] = p0;
+        out[1] = c1 | (c2 << 16);
+        out[2] = p2;
+        out[3] = c4 | (c4 << 16);
+        out[4] = c5 | (c5 << 16);
+    }
+}
+
+static void SoftFP_HudDrawSpriteBand(const SoftFPHudCommand* command,
+                                     SoftPixel* dst, int dstY, int rows) {
+    const VertexFixed* V0 = &command->vertices[0];
+    const VertexFixed* V1 = &command->vertices[1];
+    const VertexFixed* V2 = &command->vertices[2];
+    PackedCol vColor = V0->c;
+    int rawMinX = FixedToInt(V0->x), rawMinY = FixedToInt(V0->y);
+    int rawMaxX = FixedToInt(V1->x), rawMaxY = FixedToInt(V2->y);
+    int minX, minY, maxX, maxY, width, height;
+    int begTX, begTY, delTX, delTY;
+    int screenMinX, screenMinY;
+    int tintR = PackedCol_R(vColor), tintG = PackedCol_G(vColor);
+    int tintB = PackedCol_B(vColor);
+    cc_bool fast;
+    int x, y;
+
+    if (!command->texturePixels || command->textureWidth <= 0 ||
+        command->textureHeight <= 0) return;
+    if (rawMaxX < 0 || rawMinX > fb_maxX || rawMaxY < 0 || rawMinY > fb_maxY) return;
+    width = rawMaxX - rawMinX; height = rawMaxY - rawMinY;
+    if (!width) width = 1;
+    if (!height) height = 1;
+    begTX = FixedMul(V0->u, IntToFixed(command->textureWidth)) >> FP_SHIFT;
+    begTY = FixedMul(V0->v, IntToFixed(command->textureHeight)) >> FP_SHIFT;
+    delTX = (FixedMul(V1->u, IntToFixed(command->textureWidth)) >> FP_SHIFT) - begTX;
+    delTY = (FixedMul(V2->v, IntToFixed(command->textureHeight)) >> FP_SHIFT) - begTY;
+    fast = delTX == width && delTY == height && begTX >= 0 && begTY >= 0 &&
+           begTX + delTX < command->textureWidth &&
+           begTY + delTY < command->textureHeight;
+
+    screenMinX = max(rawMinX, 0); screenMinY = max(rawMinY, 0);
+    minX = screenMinX; maxX = min(rawMaxX, fb_maxX);
+    minY = max(screenMinY, dstY);
+    maxY = min(min(rawMaxY, fb_maxY), dstY + rows - 1);
+    if (minX > maxX || minY > maxY) return;
+
+    for (y = minY; y <= maxY; y++) {
+        int texY = fast ? begTY + y - screenMinY :
+            (begTY + (int)(((int64_t)delTY * (y - screenMinY)) / height)) &
+            command->textureHeightMask;
+        SoftPixel* out = dst + (y - dstY) * CLASSICUBE_DISPLAY_WIDTH;
+        int texRow = texY * command->textureWidth;
+        for (x = minX; x <= maxX; x++) {
+            int texX = fast ? begTX + x - screenMinX :
+                (begTX + (int)(((int64_t)delTX * (x - screenMinX)) / width)) &
+                command->textureWidthMask;
+            SoftTexel texel = command->texturePixels[texRow + texX];
+#if defined CC_BUILD_SOFTFP_TEX16 && defined CC_BUILD_SOFTFP_FB16
+            if (command->alphaBlend && !(texel & SOFT_TEXEL_A_MASK)) continue;
+            out[x] = vColor == PACKEDCOL_WHITE ? SoftPixel_FromTexel(texel) :
+                     SoftPixel_FromTexelTint(texel, tintR, tintG, tintB);
+#else
+            BitmapCol color = SoftTexel_ToBitmap(texel);
+            int A = BitmapCol_A(color);
+            int R = BitmapCol_R(color), G = BitmapCol_G(color), B = BitmapCol_B(color);
+            if (command->alphaBlend && !A) continue;
+            if (vColor != PACKEDCOL_WHITE) {
+                R = (PackedCol_R(vColor) * R) >> 8;
+                G = (PackedCol_G(vColor) * G) >> 8;
+                B = (PackedCol_B(vColor) * B) >> 8;
+            }
+            if (command->alphaBlend && A < 0xFE) {
+                SoftPixel old = out[x];
+                R = (R * A + SoftPixel_R(old) * (255 - A)) >> 8;
+                G = (G * A + SoftPixel_G(old) * (255 - A)) >> 8;
+                B = (B * A + SoftPixel_B(old) * (255 - A)) >> 8;
+            }
+            out[x] = SoftPixel_Make(R, G, B);
+#endif
+        }
+    }
+}
+
+static void SoftFP_HudDrawTriangleBand(const SoftFPHudCommand* command,
+                                       const VertexFixed* V0,
+                                       const VertexFixed* V1,
+                                       const VertexFixed* V2,
+                                       SoftPixel* dst, int dstY, int rows) {
+    int x0_fp = V0->x, y0_fp = V0->y;
+    int x1_fp = V1->x, y1_fp = V1->y;
+    int x2_fp = V2->x, y2_fp = V2->y;
+    int minX = FixedToInt(min(x0_fp, min(x1_fp, x2_fp)));
+    int minY = FixedToInt(min(y0_fp, min(y1_fp, y2_fp)));
+    int maxX = FixedToInt(max(x0_fp, max(x1_fp, x2_fp)));
+    int maxY = FixedToInt(max(y0_fp, max(y1_fp, y2_fp)));
+    int u0, v0, u1, v1, u2, v2;
+    PackedCol color = V0->c;
+    int area, factor, dx01, dy01, dx12, dy12, dx20, dy20;
+    int minX_fp, minY_fp, bc0_start, bc1_start, bc2_start;
+    int fastTintR = PackedCol_R(color), fastTintG = PackedCol_G(color);
+    int fastTintB = PackedCol_B(color);
+    cc_bool fastA1Textured;
+    int x, y;
+
+    if (maxX < 0 || minX > fb_maxX || maxY < dstY || minY >= dstY + rows) return;
+    minX = max(minX, 0); maxX = min(maxX, fb_maxX);
+    minY = max(max(minY, 0), dstY);
+    maxY = min(min(maxY, fb_maxY), dstY + rows - 1);
+    if (minX > maxX || minY > maxY) return;
+
+    u0 = FixedMul(V0->u, IntToFixed(command->textureWidth));
+    v0 = FixedMul(V0->v, IntToFixed(command->textureHeight));
+    u1 = FixedMul(V1->u, IntToFixed(command->textureWidth));
+    v1 = FixedMul(V1->v, IntToFixed(command->textureHeight));
+    u2 = FixedMul(V2->u, IntToFixed(command->textureWidth));
+    v2 = FixedMul(V2->v, IntToFixed(command->textureHeight));
+    fastA1Textured = command->format == VERTEX_FORMAT_TEXTURED &&
+                     command->alphaBlend && PackedCol_A(color) == 255;
+
+    area = edgeFunctionFixed(x0_fp,y0_fp, x1_fp,y1_fp, x2_fp,y2_fp);
+    if (!area) return;
+    factor = FixedReciprocalFast(area);
+    dx01 = y0_fp - y1_fp; dy01 = x1_fp - x0_fp;
+    dx12 = y1_fp - y2_fp; dy12 = x2_fp - x1_fp;
+    dx20 = y2_fp - y0_fp; dy20 = x0_fp - x2_fp;
+    minX_fp = IntToFixed(minX) + FP_HALF;
+    minY_fp = IntToFixed(minY) + FP_HALF;
+    bc0_start = edgeFunctionFixed(x1_fp,y1_fp, x2_fp,y2_fp, minX_fp,minY_fp);
+    bc1_start = edgeFunctionFixed(x2_fp,y2_fp, x0_fp,y0_fp, minX_fp,minY_fp);
+    bc2_start = edgeFunctionFixed(x0_fp,y0_fp, x1_fp,y1_fp, minX_fp,minY_fp);
+
+    for (y = minY; y <= maxY;
+         y++, bc0_start += dy12, bc1_start += dy20, bc2_start += dy01) {
+        int bc0 = bc0_start, bc1 = bc1_start, bc2 = bc2_start;
+        SoftPixel* out = dst + (y - dstY) * CLASSICUBE_DISPLAY_WIDTH;
+        for (x = minX; x <= maxX; x++, bc0 += dx12, bc1 += dx20, bc2 += dx01) {
+            int ic0 = FixedMul(bc0, factor);
+            int ic1 = FixedMul(bc1, factor);
+            int ic2 = FixedMul(bc2, factor);
+            int R, G, B, A;
+            if (ic0 < 0 || ic1 < 0 || ic2 < 0) continue;
+            if (command->format == VERTEX_FORMAT_TEXTURED) {
+                int u, v, texX, texY;
+                SoftTexel texel;
+                if (!command->texturePixels) continue;
+                u = FixedMul(ic0, u0) + FixedMul(ic1, u1) + FixedMul(ic2, u2);
+                v = FixedMul(ic0, v0) + FixedMul(ic1, v1) + FixedMul(ic2, v2);
+                texX = FixedToInt(u) & command->textureWidthMask;
+                texY = FixedToInt(v) & command->textureHeightMask;
+                texel = command->texturePixels[texY * command->textureWidth + texX];
+#if defined CC_BUILD_SOFTFP_TEX16 && defined CC_BUILD_SOFTFP_FB16
+                if (fastA1Textured) {
+                    if (!(texel & SOFT_TEXEL_A_MASK)) continue;
+                    out[x] = SoftPixel_FromTexelTint(
+                        texel, fastTintR, fastTintG, fastTintB);
+                    continue;
+                }
+#endif
+                A = (PackedCol_A(color) * SoftTexel_A(texel)) >> 8;
+                R = (PackedCol_R(color) * SoftTexel_R(texel)) >> 8;
+                G = (PackedCol_G(color) * SoftTexel_G(texel)) >> 8;
+                B = (PackedCol_B(color) * SoftTexel_B(texel)) >> 8;
+            } else {
+                R = PackedCol_R(color); G = PackedCol_G(color);
+                B = PackedCol_B(color); A = PackedCol_A(color);
+            }
+            if (command->alphaTest && A < 0x80) continue;
+            if (command->alphaBlend && !A) continue;
+            if (command->alphaBlend && A < 0xFE) {
+                SoftPixel old = out[x];
+#ifdef CC_BUILD_SOFTFP_HALF_ALPHA
+                R = (R + SoftPixel_R(old)) >> 1;
+                G = (G + SoftPixel_G(old)) >> 1;
+                B = (B + SoftPixel_B(old)) >> 1;
+#else
+                R = (R * A + SoftPixel_R(old) * (255 - A)) >> 8;
+                G = (G * A + SoftPixel_G(old) * (255 - A)) >> 8;
+                B = (B * A + SoftPixel_B(old) * (255 - A)) >> 8;
+#endif
+            }
+            out[x] = SoftPixel_Make(R, G, B);
+        }
+    }
+}
+
+static void SoftFP_HudOverlayBand(const SoftFPHudFrame* frame,
+                                  SoftPixel* dst, int dstY, int rows) {
+    cc_uint32 i;
+    for (i = 0; i < frame->commandCount; i++) {
+        const SoftFPHudCommand* command = &frame->commands[i];
+        if (command->type == SOFTFP_HUD_COMMAND_PIXELS) {
+            cc_uint32 p;
+            cc_uint32 first = (cc_uint32)dstY * CLASSICUBE_DISPLAY_WIDTH;
+            cc_uint32 limit = (cc_uint32)(dstY + rows) * CLASSICUBE_DISPLAY_WIDTH;
+            for (p = 0; p < command->cachedPixelCount; p++) {
+                const SoftFPHotbarCacheEntry* entry = &command->cachedPixels[p];
+                if (entry->index >= first && entry->index < limit) {
+                    dst[entry->index - first] = entry->color;
+                }
+            }
+        } else if (command->hints & (DRAW_HINT_SPRITE | DRAW_HINT_RECT)) {
+            SoftFP_HudDrawSpriteBand(command, dst, dstY, rows);
+        } else {
+            SoftFP_HudDrawTriangleBand(command, &command->vertices[0],
+                &command->vertices[2], &command->vertices[1], dst, dstY, rows);
+            SoftFP_HudDrawTriangleBand(command, &command->vertices[2],
+                &command->vertices[0], &command->vertices[3], dst, dstY, rows);
+        }
+    }
+}
+
+static void SoftFP_HudComposeBand(void* context, cc_uint16* dst,
+                                  int dstY, int rows) {
+    const SoftFPHudFrame* frame = (const SoftFPHudFrame*)context;
+    int previousSourceY = -1;
+    int row;
+    for (row = 0; row < rows; row++) {
+        int sourceY = ((dstY + row) * 3 + 2) / 5;
+        SoftPixel* out = (SoftPixel*)dst + row * CLASSICUBE_DISPLAY_WIDTH;
+        if (sourceY == previousSourceY) {
+            Mem_Copy(out, out - CLASSICUBE_DISPLAY_WIDTH,
+                     CLASSICUBE_DISPLAY_WIDTH * sizeof(SoftPixel));
+        } else {
+            SoftFP_ScaleRow192To320(
+                frame->scene + sourceY * CLASSICUBE_3D_WIDTH, out);
+            previousSourceY = sourceY;
+        }
+    }
+    SoftFP_HudOverlayBand(frame, (SoftPixel*)dst, dstY, rows);
+}
+
+static void SoftFP_HudForceFallback(void) {
+    SoftFPHudFrame* frame;
+    if (!softfpStreamPresent) return;
+    frame = SoftFP_HudCurrentFrame();
+    softfpHudCapturing = false;
+    softfpStreamPresent = false;
+    SoftFP_ScaleFullRaster();
+    if (frame) SoftFP_HudOverlayBand(frame, colorBuffer, 0, fb_height);
+}
+#endif
+
 
 static void ProcessClippedTriangleAndDraw(VertexFixed* inVerts, int polyCount,
                                           cc_bool optimizeMap, cc_bool forceAffine) {
@@ -6090,26 +6552,33 @@ void DrawQuadsFixed(int startVertex, int verticesCount, DrawHints hints) {
 #endif
 #endif
 
-    if (gfx_rendering2D && (hints & (DRAW_HINT_SPRITE|DRAW_HINT_RECT))) {
-        for (i = 0; i < verticesCount / 4; i++, j += 4) {
-            TransformVertex2D(j + 0, &vertices[0]);
-            TransformVertex2D(j + 1, &vertices[1]);
-            TransformVertex2D(j + 2, &vertices[2]);
-            DrawSprite2D(&vertices[0], &vertices[1], &vertices[2]);
-        }
-    } else if (gfx_rendering2D) {
+    if (gfx_rendering2D) {
         for (i = 0; i < verticesCount / 4; i++, j += 4) {
             TransformVertex2D(j + 0, &vertices[0]);
             TransformVertex2D(j + 1, &vertices[1]);
             TransformVertex2D(j + 2, &vertices[2]);
             TransformVertex2D(j + 3, &vertices[3]);
-            DrawTriangle2D(&vertices[0], &vertices[2], &vertices[1]);
-            DrawTriangle2D(&vertices[2], &vertices[0], &vertices[3]);
+#ifdef SOFTFP_LOWRES_COLOR_STAGE
+            if (softfpHudCapturing && !hotbarCacheCapturing &&
+                SoftFP_HudCaptureQuad(vertices, hints)) continue;
+#endif
+            if (hints & (DRAW_HINT_SPRITE | DRAW_HINT_RECT)) {
+                DrawSprite2D(&vertices[0], &vertices[1], &vertices[2]);
+            } else {
+                DrawTriangle2D(&vertices[0], &vertices[2], &vertices[1]);
+                DrawTriangle2D(&vertices[2], &vertices[0], &vertices[3]);
+            }
         }
     } else {
 		cc_uint32 clipPlaneMask = (1u << NUM_PLANES) - 1u;
 		cc_bool optimizeMap = false;
 		cc_bool forceAffine = (hints & DRAW_HINT_AFFINE) != 0;
+#ifdef CC_BUILD_ESP32S3
+		/* Crossed vegetation sprites contain alpha cutouts and are not eligible
+		 * for the opaque perspective kernel. Keep them explicitly affine even if
+		 * nearby map batches otherwise allow selective perspective correction. */
+		forceAffine |= (hints & DRAW_HINT_SPRITE) != 0;
+#endif
 #ifdef CC_BUILD_SOFTFP_QUAD_FRUSTUM_CULL
 		optimizeMap = (hints & SOFTFP_MAP_BATCH_HINT) != 0;
 		if (optimizeMap) {
@@ -6369,8 +6838,24 @@ void Gfx_EndFrame(void) {
     holo_perf_add(HOLO_PERF_TINT_LOAD, terrainTintCacheMisses);
 #endif
 #endif
+#ifdef SOFTFP_LOWRES_COLOR_STAGE
+    if (softfpStreamPresent) {
+        SoftFPHudFrame* frame = SoftFP_HudCurrentFrame();
+        SoftFP_FinishRasterSnapshot();
+        if (frame) frame->scene = rasterColorSnapshots[rasterColorRenderIndex];
+        if (frame && !frame->overflow &&
+            holo_window_present_composed(frame, SoftFP_HudComposeBand)) {
+            SoftFP_SelectRasterSnapshot(rasterColorRenderIndex ^ 1u);
+            softfpStreamPresent = false;
+            colorBuffer = (SoftPixel*)fb_bmp.scan0;
+            return;
+        }
+        /* A failed queue is rare, but preserve the frame by rebuilding the
+         * native menu buffer and sending it through the synchronous path. */
+        SoftFP_HudForceFallback();
+    }
+#endif
     Window_DrawFramebuffer(r, &fb_bmp);
-    /* The Holo backend may hand the completed buffer to its Core 0 presenter. */
     colorBuffer = (SoftPixel*)fb_bmp.scan0;
 }
 
@@ -6420,41 +6905,28 @@ void Gfx_OnWindowResize(int width, int height) {
         Platform_LogConst("[cc.gfx] Z8 encode LUT unavailable; scalar encode");
     }
 #endif
-    rasterColorBuffer = (SoftPixel*)Mem_Alloc(
-        raster_width, CLASSICUBE_COLOR_PSRAM_ROWS * sizeof(SoftPixel),
-        "192x72 staged color buffer");
-    if (!rasterColorInternal[0]) {
-        rasterColorFallback[0] = (SoftPixel*)Mem_Alloc(
-            raster_width, CLASSICUBE_COLOR_BAND_ROWS * sizeof(SoftPixel),
-            "192x36 staged color fallback A");
-    }
-    if (!rasterColorInternal[1]) {
-        rasterColorFallback[1] = (SoftPixel*)Mem_Alloc(
-            raster_width, CLASSICUBE_COLOR_BAND_ROWS * sizeof(SoftPixel),
-            "192x36 staged color fallback B");
-    }
+    rasterColorSnapshots[0] = (SoftPixel*)Mem_Alloc(
+        raster_width, raster_height * sizeof(SoftPixel),
+        "192x144 streamed snapshot A");
+    rasterColorSnapshots[1] = (SoftPixel*)Mem_Alloc(
+        raster_width, raster_height * sizeof(SoftPixel),
+        "192x144 streamed snapshot B");
+    softfpHudFrames = (SoftFPHudFrame*)Mem_Alloc(
+        2, sizeof(SoftFPHudFrame), "double buffered streamed HUD commands");
+    Mem_Set(softfpHudFrames, 0, 2 * sizeof(SoftFPHudFrame));
     {
-        int row;
-        for (row = 0; row < raster_height; row++) {
-            if (row < CLASSICUBE_COLOR_PSRAM_ROWS) {
-                rasterColorRows[row] = rasterColorBuffer + row * raster_width;
-            } else {
-                int localRow = row - CLASSICUBE_COLOR_PSRAM_ROWS;
-                int band = localRow / CLASSICUBE_COLOR_BAND_ROWS;
-                SoftPixel* pixels = rasterColorInternal[band] ?
-                    rasterColorInternal[band] : rasterColorFallback[band];
-                rasterColorRows[row] = pixels +
-                    (localRow % CLASSICUBE_COLOR_BAND_ROWS) * raster_width;
-            }
-        }
-        if (rasterColorInternal[0] && rasterColorInternal[1]) {
-            Platform_LogConst("[cc.gfx] color=lower72 internal=27648 + top72 PSRAM=27648");
-        } else if (rasterColorInternal[0] || rasterColorInternal[1]) {
-            Platform_LogConst("[cc.gfx] color=36 rows internal=13824 + 108 rows PSRAM=41472");
-        } else {
-            Platform_LogConst("[cc.gfx] color bands internal unavailable; 192x144 RGB565 in PSRAM");
-        }
+        int hudBytes = (int)(2 * sizeof(SoftFPHudFrame));
+        Platform_Log1("[cc.gfx] streamed HUD snapshots=%i bytes PSRAM", &hudBytes);
     }
+    SoftFP_SelectRasterSnapshot(0);
+    if (rasterColorInternal[0] && rasterColorInternal[1]) {
+        Platform_LogConst("[cc.gfx] color=192x144 PSRAM snapshots=2 + shared lower72 internal=27648");
+    } else if (rasterColorInternal[0] || rasterColorInternal[1]) {
+        Platform_LogConst("[cc.gfx] color=192x144 PSRAM snapshots=2 + shared lower36 internal=13824");
+    } else {
+        Platform_LogConst("[cc.gfx] color=192x144 PSRAM snapshots=2; internal hot bands unavailable");
+    }
+    Platform_LogConst("[cc.gfx] present=fused 192x144->320x240 in 10-row DMA bands + HUD commands; menu fallback=single native frame");
 #endif
 
 #ifdef CC_BUILD_SOFTFP_LOWRES_RASTER
@@ -6551,7 +7023,7 @@ void Gfx_OnWindowResize(int width, int height) {
     Platform_LogConst("[cc.gfx] raster=3D-lowres Z32 scaled UI=320x240");
 #endif
 #ifdef SOFTFP_LOWRES_COLOR_STAGE
-    Platform_LogConst("[cc.gfx] color=192x144 RGB565 lower72-hot split upscale=packed-single-pass-before-UI");
+    Platform_LogConst("[cc.gfx] color=192x144 RGB565 snapshot-pingpong lower72-hot; fused DMA upscale+HUD");
 #endif
 #endif
 #ifdef CC_BUILD_SOFTFP_QUAD_FRUSTUM_CULL

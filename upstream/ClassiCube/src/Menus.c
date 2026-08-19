@@ -665,7 +665,7 @@ static struct OptionsGroupScreen {
 } OptionsGroupScreen;
 
 static const char* const optsGroup_descs[8] = {
-	"&eMusic/Sound, view bobbing, and more",
+	"&eBGM/SFX volume, view bobbing, and more",
 	"&eGui scale, font settings, and more",
 	"&eFPS limit, view distance, entity names/shadows",
 	"&eSet key and mouse bindings",
@@ -675,7 +675,7 @@ static const char* const optsGroup_descs[8] = {
 	"&eSettings for resembling the original classic",
 };
 static const struct SimpleButtonDesc optsGroup_btns[8] = {
-	{ -160, -100, "Misc options...",      Menu_SwitchMisc        },
+	{ -160, -100, "Audio / misc...",      Menu_SwitchMisc        },
 	{ -160,  -50, "Gui options...",       Menu_SwitchGui         },
 	{ -160,    0, "Graphics options...",  Menu_SwitchGfx         },
 	{ -160,   50, "Controls...",          SwitchBindsMain        },

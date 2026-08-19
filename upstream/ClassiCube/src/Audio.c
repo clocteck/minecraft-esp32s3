@@ -13,6 +13,9 @@
 #include "Utils.h"
 #include "Options.h"
 #include "Deflate.h"
+#if defined CC_BUILD_NOMUSIC && defined CC_BUILD_ESP32S3
+#include "Audio_Holo.h"
+#endif
 #ifdef CC_BUILD_MOBILE
 /* TODO: Refactor maybe to not rely on checking WinInfo.Handle != NULL */
 #include "Window.h"
@@ -237,7 +240,7 @@ static cc_result ProcessZipEntry(const cc_string* path, struct Stream* stream, s
 	return 0;
 }
 
-static cc_result Sounds_ExtractZip(const cc_string* path) {
+static cc_result Sounds_ExtractZip(const cc_string* path, cc_bool warnIfMissing) {
 	struct ZipEntry entries[128];
 	struct Stream stream;
 	cc_filepath raw_path;
@@ -245,7 +248,16 @@ static cc_result Sounds_ExtractZip(const cc_string* path) {
 
 	Platform_EncodePath(&raw_path, path);
 	res = Stream_OpenPath(&stream, &raw_path);
-	if (res) { Logger_IOWarn2(res, "opening", &raw_path); return res; }
+	if (res) {
+		/* audio/default.zip is optional. The redistributable ClassiCube sounds
+		 * live in audio/classicube.zip, so do not show a red warning before the
+		 * expected fallback. Still report every other open error, and report a
+		 * missing fallback archive. */
+		if (warnIfMissing || res != ReturnCode_FileNotFound) {
+			Logger_IOWarn2(res, "opening", &raw_path);
+		}
+		return res;
+	}
 
 	res = Zip_Extract(&stream, SelectZipEntry, ProcessZipEntry,
 						entries, Array_Elems(entries));
@@ -257,9 +269,9 @@ static cc_result Sounds_ExtractZip(const cc_string* path) {
 }
 
 void Sounds_LoadDefault(void) {
-	cc_result res = Sounds_ExtractZip(&Sounds_ZipPathMC);
+	cc_result res = Sounds_ExtractZip(&Sounds_ZipPathMC, false);
 	if (res == ReturnCode_FileNotFound)
-		Sounds_ExtractZip(&Sounds_ZipPathCC);
+		Sounds_ExtractZip(&Sounds_ZipPathCC, true);
 }
 
 static cc_bool sounds_loaded;
@@ -293,6 +305,25 @@ void Audio_PlayStepSound(cc_uint8 type) { Sounds_Play(type, &stepBoard); }
 *--------------------------------------------------------Music------------------------------------------------------------*
 *#########################################################################################################################*/
 #ifdef CC_BUILD_NOMUSIC
+#ifdef CC_BUILD_ESP32S3
+/* The ESP32-S3 backend streams a low-rate PCM WAV through the existing mixer.
+ * This avoids a second decoder task and large OGG state while retaining
+ * independent music volume. */
+static void Music_Init(void) {
+	int volume = Options_GetInt(OPT_MUSIC_VOLUME, 0, 100, DEFAULT_MUSIC_VOLUME);
+	Audio_SetMusic(volume);
+}
+static void Music_Free(void) { Audio_HoloSetMusicVolume(0); }
+static void Music_Stop(void) { Audio_HoloSetMusicVolume(0); }
+static void Music_Start(void) {
+	if (!AudioBackend_Init()) {
+		AudioBackend_Free();
+		Audio_MusicVolume = 0;
+		return;
+	}
+	Audio_HoloSetMusicVolume(Audio_MusicVolume);
+}
+#else
 /* Can't use mojang's music assets, so just stub everything out */
 static void Music_Init(void) { }
 static void Music_Free(void) { }
@@ -301,6 +332,7 @@ static void Music_Start(void) {
 	Chat_AddRaw("&cMusic is not supported currently");
 	Audio_MusicVolume = 0;
 }
+#endif
 #else
 static void* music_thread;
 static void* music_waitable;

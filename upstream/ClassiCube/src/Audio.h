@@ -16,7 +16,9 @@ struct AudioContext;
 	#define DEFAULT_SOUNDS_VOLUME 100
 #endif
 
-#if defined CC_BUILD_NOMUSIC || defined CC_BUILD_SYMBIAN
+#if defined CC_BUILD_ESP32S3
+	#define DEFAULT_MUSIC_VOLUME  25
+#elif defined CC_BUILD_NOMUSIC || defined CC_BUILD_SYMBIAN
 	#define DEFAULT_MUSIC_VOLUME   0
 #else
 	#define DEFAULT_MUSIC_VOLUME 100

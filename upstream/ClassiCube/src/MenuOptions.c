@@ -538,10 +538,25 @@ void MenuOptionsScreen_Show(InitMenuOptions init) {
 enum ViewDist { VIEW_TINY, VIEW_SHORT, VIEW_NORMAL, VIEW_FAR, VIEW_COUNT };
 static const char* const viewDistNames[VIEW_COUNT] = { "TINY", "SHORT", "NORMAL", "FAR" };
 
-static cc_bool ClO_GetMusic(void) { return Audio_MusicVolume > 0; }
-static void    ClO_SetMusic(cc_bool v) {
-	Audio_SetMusic(v ? 100 : 0);
-	Options_SetInt(OPT_MUSIC_VOLUME, Audio_MusicVolume);
+static const char* const volumeNames[] = { "OFF", "25%", "50%", "75%", "100%" };
+
+static int AudioOptions_GetLevel(int volume) {
+	int level = (volume + 12) / 25;
+	if (level < 0) level = 0;
+	if (level >= Array_Elems(volumeNames)) level = Array_Elems(volumeNames) - 1;
+	return level;
+}
+static int AudioOptions_GetMusic(void) { return AudioOptions_GetLevel(Audio_MusicVolume); }
+static void AudioOptions_SetMusic(int level) {
+	int volume = level * 25;
+	Options_SetInt(OPT_MUSIC_VOLUME, volume);
+	Audio_SetMusic(volume);
+}
+static int AudioOptions_GetSounds(void) { return AudioOptions_GetLevel(Audio_SoundsVolume); }
+static void AudioOptions_SetSounds(int level) {
+	int volume = level * 25;
+	Options_SetInt(OPT_SOUND_VOLUME, volume);
+	Audio_SetSounds(volume);
 }
 
 static cc_bool ClO_GetInvert(void) { return Camera.Invert; }
@@ -566,12 +581,6 @@ static cc_bool ClO_GetAnaglyph(void) { return Game_Anaglyph3D; }
 static void    ClO_SetAnaglyph(cc_bool v) {
 	Game_Anaglyph3D = v;
 	Options_SetBool(OPT_ANAGLYPH3D, v);
-}
-
-static cc_bool ClO_GetSounds(void) { return Audio_SoundsVolume > 0; }
-static void    ClO_SetSounds(cc_bool v) {
-	Audio_SetSounds(v ? 100 : 0);
-	Options_SetInt(OPT_SOUND_VOLUME, Audio_SoundsVolume);
 }
 
 static cc_bool ClO_GetShowFPS(void) { return Gui.ShowFPS; }
@@ -608,8 +617,8 @@ static void ClassicOptionsScreen_RecreateExtra(struct MenuOptionsScreen* s) {
 static void ClassicOptionsScreen_InitWidgets(struct MenuOptionsScreen* s) {
 	MenuOptionsScreen_BeginButtons(s);
 	{
-		MenuOptionsScreen_AddBool(s, "Music",
-			ClO_GetMusic,    ClO_SetMusic, NULL);
+		MenuOptionsScreen_AddEnum(s, "BGM volume", volumeNames, Array_Elems(volumeNames),
+			AudioOptions_GetMusic, AudioOptions_SetMusic, NULL);
 		MenuOptionsScreen_AddBool(s, "Invert mouse",
 			ClO_GetInvert,   ClO_SetInvert, NULL);
 		MenuOptionsScreen_AddEnum(s, "Render distance", viewDistNames, VIEW_COUNT,
@@ -617,8 +626,8 @@ static void ClassicOptionsScreen_InitWidgets(struct MenuOptionsScreen* s) {
 		MenuOptionsScreen_AddBool(s, "3d anaglyph",
 			ClO_GetAnaglyph, ClO_SetAnaglyph, NULL);
 		
-		MenuOptionsScreen_AddBool(s, "Sound",
-			ClO_GetSounds,   ClO_SetSounds, NULL);
+		MenuOptionsScreen_AddEnum(s, "SFX volume", volumeNames, Array_Elems(volumeNames),
+			AudioOptions_GetSounds, AudioOptions_SetSounds, NULL);
 		MenuOptionsScreen_AddBool(s, "Show FPS",
 			ClO_GetShowFPS,  ClO_SetShowFPS, NULL);
 		MenuOptionsScreen_AddBool(s, "View bobbing",
@@ -1118,18 +1127,6 @@ static void MiO_SetCameraMass(const cc_string* c) {
 static void MiO_GetReach(cc_string* v) { String_AppendFloat(v, Entities.CurPlayer->ReachDistance, 2); }
 static void MiO_SetReach(const cc_string* v) { Entities.CurPlayer->ReachDistance = Menu_Float(v); }
 
-static int  MiO_GetMusic(void)  { return Audio_MusicVolume; }
-static void MiO_SetMusic(int v) {
-	Options_SetInt(OPT_MUSIC_VOLUME, v);
-	Audio_SetMusic(v);
-}
-
-static int  MiO_GetSounds(void)  { return Audio_SoundsVolume; }
-static void MiO_SetSounds(int v) {
-	Options_SetInt(OPT_SOUND_VOLUME, v);
-	Audio_SetSounds(v);
-}
-
 static cc_bool MiO_GetViewBob(void) { return Game_ViewBobbing; }
 static void    MiO_SetViewBob(cc_bool v) { 
 	Game_ViewBobbing = v;
@@ -1170,12 +1167,12 @@ static void MiscSettingsScreen_InitWidgets(struct MenuOptionsScreen* s) {
 			1, 100, 20,
 			MiO_GetCameraMass, MiO_SetCameraMass,
 			"&eChange the smoothness of the smooth camera.");
-		MenuOptionsScreen_AddInt(s,  "Music volume",
-			   0, 100,  DEFAULT_MUSIC_VOLUME,
-			MiO_GetMusic,     MiO_SetMusic, NULL);
-		MenuOptionsScreen_AddInt(s,  "Sounds volume",
-			   0, 100,  DEFAULT_SOUNDS_VOLUME,
-			MiO_GetSounds,  MiO_SetSounds, NULL);
+		MenuOptionsScreen_AddEnum(s, "BGM volume", volumeNames, Array_Elems(volumeNames),
+			AudioOptions_GetMusic, AudioOptions_SetMusic,
+			"&eBackground music volume. 0% turns the ambient soundtrack off.");
+		MenuOptionsScreen_AddEnum(s, "SFX volume", volumeNames, Array_Elems(volumeNames),
+			AudioOptions_GetSounds, AudioOptions_SetSounds,
+			"&eBlock breaking, placing, and footstep volume.");
 
 		MenuOptionsScreen_AddBool(s, "Block physics",
 			MiO_GetPhysics, MiO_SetPhysics, NULL);

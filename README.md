@@ -12,14 +12,16 @@ of producing a standalone flash image.
 - RGB565 DMA output to the host display
 - game state/options/maps on SD card
 - Lua-to-native controller bridge
-- Core 0 software-mixed 22050 Hz game sound effects through the host audio API
+- Core 0 software-mixed 22050 Hz game sound effects and streamed PCM BGM
 - PSRAM-backed game heap and task stack
-- no networking, music, updater, plugins, or FreeType
+- no networking, updater, plugins, or FreeType
 
-The double-buffered 320x240 colour buffers live in PSRAM. The 192x144 Z8 depth
-buffer (27,648 bytes) prefers internal RAM and falls back to PSRAM without changing
-resolution. 3D samples use fixed 5:3 expansion into the native 320x240 framebuffer while
-UI remains native. This build still requires PSRAM for the game heap.
+Two immutable 192x144 RGB565 scene snapshots live in PSRAM. The 192x144 Z8
+depth buffer (27,648 bytes) prefers internal RAM and falls back to PSRAM without
+changing resolution. During normal gameplay, Core 0 expands six source rows
+directly into each 320x10 internal DMA band and overlays a frozen native-resolution
+HUD command list. Menus retain one full 320x240 PSRAM compatibility framebuffer.
+This build still requires PSRAM for the game heap.
 
 The ESP32-S3 terrain path keeps mesh faces as quads through clipping and
 culling, then rasterises textured faces as two affine triangles so all four UV
@@ -44,13 +46,14 @@ Distance fog is disabled: the ordered low-cost variant was visibly granular at
 The packaged texture set is the complete ClassiCube resource archive with a
 256x256 terrain atlas; the earlier N64-only 256x128 atlas omitted upper rows.
 The 27,648-byte Z8 buffer gets first claim on internal RAM after the mandatory
-LCD DMA blocks. The 192x144 RGB565 3D stage is split evenly: its top 72 rows use
-27,648 bytes of PSRAM, while its busier lower 72 rows use two 36-row internal
-bands totalling 27,648 bytes. LCD output uses two 320x10 RGB565 DMA blocks
-(12,800 bytes total). The Core 0 priority-4 presenter uses a 4 KiB internal
-stack; the main, raster, and audio task stacks remain in PSRAM at 128 KiB,
-6 KiB, and 6 KiB respectively. The optional internal dynamic-vertex arena is
-capped at 8 KiB.
+LCD DMA blocks. Two complete 192x144 PSRAM snapshots provide asynchronous scene
+ownership. During rendering, the busier lower 72 rows still use two shared
+36-row internal bands totalling 27,648 bytes; they are copied sequentially into
+the current snapshot only after Core 0 finishes rasterising it. LCD output uses
+two 320x10 RGB565 DMA blocks (12,800 bytes total). The Core 0 priority-4
+presenter uses a 4 KiB internal stack; the priority-5 raster worker, audio task,
+and main task retain PSRAM stacks of 6 KiB, 8 KiB, and 128 KiB respectively.
+The optional internal dynamic-vertex arena is capped at 8 KiB.
 
 The user view distance is a maximum of 32 blocks. The renderer keeps voxel data,
 resident meshes, and visible meshes on separate distance budgets: at the default
@@ -85,10 +88,21 @@ per complete frame (roughly 27.0-27.4 FPS); simpler directions reach about
 distance according to the thresholds above. These are device measurements of
 newly generated frames, not display refreshes or unchanged-frame shortcuts.
 
-Sound effects use one host-owned mono I2S stream. Up to eight virtual voices
-are mixed by a PSRAM-stack worker pinned to Core 0; sound samples remain in
-PSRAM and the host owns all internal DMA buffers. Background music stays
-disabled to avoid a second decoder/streaming workload.
+Sound effects and `audio/bgm.wav` share one host-owned mono I2S stream. Up to
+eight SFX voices are mixed by a PSRAM-stack worker pinned to Core 0. BGM is
+stored as 11025 Hz mono 16-bit PCM, read sequentially through an 8 KiB buffer,
+and repeated to the 22050 Hz output rate. It consumes no SFX slot, decoder task,
+or full-track PCM allocation. UI volume 0-100 maps SFX to 0-200% mixer gain,
+while BGM uses one fifth of that curve (BGM 50 is about 20%). The bundled track
+loops after a three-second inter-track pause. Two fixed-point peaking biquads boost
+roughly 200-500 Hz by 6 dB and trim roughly 1-2.5 kHz by 2 dB on the final Core
+0 mix. Both controls are available as controller-friendly
+0/25/50/75/100% options.
+
+The bundled default BGM is `Home in the Wilderness` by Herowl, sourced from
+VoxeLibre under CC BY-SA 4.0 and converted from stereo OGG to 11025 Hz mono PCM
+WAV. See `package/audio/BGM-CREDITS.txt`. A user may replace `audio/bgm.wav`
+with another PCM mono 16-bit WAV at 11025 or 22050 Hz.
 
 ## Build
 

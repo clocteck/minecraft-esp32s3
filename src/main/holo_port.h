@@ -27,6 +27,12 @@ typedef struct HoloInputState {
     int16_t ry;
 } HoloInputState;
 
+/* Fills one native-width RGB565 DMA band. The callback runs on the Core 0
+ * presenter task, so context must remain immutable until the next frame is
+ * accepted (or until shutdown). */
+typedef void (*HoloPresentBandFn)(void *context, uint16_t *dst,
+                                  int dst_y, int rows);
+
 void holo_port_set_host(const module_host_api_v2 *host);
 const module_host_api_v2 *holo_port_host(void);
 
@@ -45,6 +51,14 @@ bool holo_port_display_acquire(void);
 void holo_port_display_release(void);
 void *holo_port_display_surface(void);
 void *holo_port_buffer(size_t bytes, unsigned index);
+
+/* Queues a frame whose 320x240 output is produced a 10-row DMA band at a time.
+ * This is used by the low-resolution renderer to fuse upscale and HUD overlay
+ * without materialising a full native-resolution framebuffer in PSRAM. */
+bool holo_window_present_composed(void *context, HoloPresentBandFn compose);
+/* Waits until the queued composed frame no longer references renderer-owned
+ * textures/caches. Intended for rare resource rebuild/destruction paths. */
+void holo_window_wait_present(void);
 
 bool holo_port_hot_vb_reserve(void);
 void *holo_port_hot_vb_alloc(size_t bytes);

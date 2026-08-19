@@ -36,21 +36,24 @@ struct cc_window Window_Alt;
 static cc_bool s_close_raised;
 static const module_host_api_v2 *s_window_host;
 typedef uint16_t HoloFramebufferPixel;
-static HoloFramebufferPixel *s_framebuffers[2];
-static unsigned s_render_buffer;
+static HoloFramebufferPixel *s_framebuffer;
 static uint8_t s_core1_yield_count;
 static void * volatile s_present_task;
 static module_sync_handle_t s_present_ready;
 static module_sync_handle_t s_present_done;
-static HoloFramebufferPixel * volatile s_present_pixels;
+static void * volatile s_present_context;
+static HoloPresentBandFn volatile s_present_compose;
 static volatile uint8_t s_present_stop;
 static volatile uint8_t s_present_stats_ready;
 static uint64_t s_present_convert_us;
 static uint64_t s_present_dma_us;
 static uint32_t s_present_dma_submits;
 
-static cc_bool PresentFramebuffer(HoloFramebufferPixel *pixels, uint64_t *convert_us,
-                                  uint64_t *dma_us, uint32_t *dma_submits);
+static cc_bool PresentComposed(void *context, HoloPresentBandFn compose,
+                               uint64_t *convert_us, uint64_t *dma_us,
+                               uint32_t *dma_submits);
+static void RecordPresentStats(uint64_t convert_us, uint64_t dma_us,
+                               uint32_t dma_submits);
 
 static void PresentWorker(void *arg)
 {
@@ -60,16 +63,19 @@ static void PresentWorker(void *arg)
            host->sync.take(s_present_ready, MODULE_WAIT_FOREVER) == MODULE_OK) {
         uint64_t convert_us = 0, dma_us = 0;
         uint32_t dma_submits = 0;
-        HoloFramebufferPixel *pixels;
+        void *context;
+        HoloPresentBandFn compose;
 
         if (s_present_stop) break;
-        pixels = s_present_pixels;
-        (void)PresentFramebuffer(pixels, &convert_us, &dma_us, &dma_submits);
+        context = s_present_context;
+        compose = s_present_compose;
+        (void)PresentComposed(context, compose, &convert_us, &dma_us, &dma_submits);
         s_present_convert_us = convert_us;
         s_present_dma_us = dma_us;
         s_present_dma_submits = dma_submits;
         s_present_stats_ready = 1;
-        s_present_pixels = NULL;
+        s_present_context = NULL;
+        s_present_compose = NULL;
         (void)host->sync.give(s_present_done);
     }
 
@@ -98,7 +104,8 @@ static cc_bool StartPresentWorker(void)
 
     s_present_stop = 0;
     s_present_stats_ready = 0;
-    s_present_pixels = NULL;
+    s_present_context = NULL;
+    s_present_compose = NULL;
     if (host->task.create_ex) {
         result = host->task.create_ex("cc_present", PresentWorker, NULL,
                                      PRESENT_STACK_BYTES, 4u, 0,
@@ -135,7 +142,8 @@ static void Window_HoloShutdownPresent(void)
     s_present_done = NULL;
     s_present_ready = NULL;
     s_present_task = NULL;
-    s_present_pixels = NULL;
+    s_present_context = NULL;
+    s_present_compose = NULL;
     s_present_stop = 0;
     s_present_stats_ready = 0;
 }
@@ -251,21 +259,27 @@ void Window_AllocFramebuffer(struct Bitmap *bmp, int width, int height)
 {
     bmp->width = CLASSICUBE_RENDER_WIDTH;
     bmp->height = CLASSICUBE_RENDER_HEIGHT;
-    s_render_buffer = 0;
-    s_framebuffers[0] = (HoloFramebufferPixel *)Mem_Alloc(
-        bmp->width, bmp->height * sizeof(HoloFramebufferPixel), "320x240 framebuffer A");
-    s_framebuffers[1] = (HoloFramebufferPixel *)Mem_Alloc(
-        bmp->width, bmp->height * sizeof(HoloFramebufferPixel), "320x240 framebuffer B");
-    bmp->scan0 = (BitmapCol*)s_framebuffers[0];
-    if (!s_framebuffers[1] || !StartPresentWorker()) {
-        if (s_framebuffers[1]) Mem_Free(s_framebuffers[1]);
-        s_framebuffers[1] = NULL;
-        holo_port_log("[cc.present] async presenter unavailable; using synchronous output");
+    /* One native framebuffer is retained only for menus/compatibility. Normal
+     * gameplay queues immutable 192x144 snapshots through the band composer. */
+    s_framebuffer = (HoloFramebufferPixel *)Mem_Alloc(
+        bmp->width, bmp->height * sizeof(HoloFramebufferPixel),
+        "320x240 menu fallback framebuffer");
+    bmp->scan0 = (BitmapCol*)s_framebuffer;
+    if (!StartPresentWorker()) {
+        holo_port_log("[cc.present] async presenter unavailable; composed output is synchronous");
     }
 }
 
-static cc_bool PresentFramebuffer(HoloFramebufferPixel *pixels, uint64_t *convert_us,
-                                  uint64_t *dma_us, uint32_t *dma_submits)
+static void CopyNativeBand(void *context, uint16_t *dst, int dst_y, int rows)
+{
+    const HoloFramebufferPixel *pixels = (const HoloFramebufferPixel *)context;
+    memcpy(dst, pixels + dst_y * CLASSICUBE_DISPLAY_WIDTH,
+           (size_t)rows * CLASSICUBE_DISPLAY_WIDTH * sizeof(uint16_t));
+}
+
+static cc_bool PresentComposed(void *context, HoloPresentBandFn compose,
+                               uint64_t *convert_us, uint64_t *dma_us,
+                               uint32_t *dma_submits)
 {
     const module_host_api_v2 *host = s_window_host;
     void *surface = holo_port_display_surface();
@@ -277,7 +291,7 @@ static cc_bool PresentFramebuffer(HoloFramebufferPixel *pixels, uint64_t *conver
     if (convert_us) *convert_us = 0;
     if (dma_us) *dma_us = 0;
     if (dma_submits) *dma_submits = 0;
-    if (!host || !surface || !pixels || !host->display.startWrite ||
+    if (!host || !surface || !context || !compose || !host->display.startWrite ||
         !host->display.pushImageDMA || !host->display.endWrite) return false;
     dma[0] = (uint16_t *)holo_port_buffer(
         CLASSICUBE_DISPLAY_WIDTH * CLASSICUBE_DMA_ROWS * sizeof(uint16_t), 0);
@@ -296,8 +310,7 @@ static cc_bool PresentFramebuffer(HoloFramebufferPixel *pixels, uint64_t *conver
         uint16_t *block = dma[(y / CLASSICUBE_DMA_ROWS) & 1];
         int rows = min(CLASSICUBE_DMA_ROWS, CLASSICUBE_RENDER_HEIGHT - y);
         started = holo_perf_now_us();
-        memcpy(block, pixels + y * CLASSICUBE_RENDER_WIDTH,
-               (size_t)rows * CLASSICUBE_DISPLAY_WIDTH * sizeof(uint16_t));
+        compose(context, block, y, rows);
         convert_total += holo_perf_now_us() - started;
         started = holo_perf_now_us();
         if (host->display.pushImageDMA(surface, 0, (int16_t)y, CLASSICUBE_DISPLAY_WIDTH,
@@ -322,6 +335,62 @@ static cc_bool PresentFramebuffer(HoloFramebufferPixel *pixels, uint64_t *conver
     return true;
 }
 
+static void RecordPendingPresentStats(void)
+{
+    if (!s_present_stats_ready) return;
+    RecordPresentStats(s_present_convert_us, s_present_dma_us,
+                       s_present_dma_submits);
+    s_present_stats_ready = 0;
+}
+
+bool holo_window_present_composed(void *context, HoloPresentBandFn compose)
+{
+    const module_host_api_v2 *host = s_window_host;
+    uint64_t convert_us = 0, dma_us = 0;
+    uint64_t wait_started;
+    uint32_t dma_submits = 0;
+
+    if (!context || !compose) return false;
+    if (s_present_task && s_present_done && s_present_ready && host &&
+        host->sync.take && host->sync.give) {
+        wait_started = holo_perf_now_us();
+        (void)host->sync.take(s_present_done, MODULE_WAIT_FOREVER);
+        holo_perf_add(HOLO_PERF_ASYNC_WAIT, holo_perf_now_us() - wait_started);
+        RecordPendingPresentStats();
+        s_present_context = context;
+        s_present_compose = compose;
+        if (host->sync.give(s_present_ready) == MODULE_OK) {
+            if (++s_core1_yield_count >= 8) {
+                s_core1_yield_count = 0;
+                if (host->task.delay) host->task.delay(1);
+            }
+            return true;
+        }
+        s_present_context = NULL;
+        s_present_compose = NULL;
+        (void)host->sync.give(s_present_done);
+    }
+
+    if (!PresentComposed(context, compose, &convert_us, &dma_us, &dma_submits)) {
+        return false;
+    }
+    RecordPresentStats(convert_us, dma_us, dma_submits);
+    return true;
+}
+
+void holo_window_wait_present(void)
+{
+    const module_host_api_v2 *host = s_window_host;
+    uint64_t wait_started;
+    if (!s_present_task || !s_present_done || !host ||
+        !host->sync.take || !host->sync.give) return;
+    wait_started = holo_perf_now_us();
+    (void)host->sync.take(s_present_done, MODULE_WAIT_FOREVER);
+    holo_perf_add(HOLO_PERF_ASYNC_WAIT, holo_perf_now_us() - wait_started);
+    RecordPendingPresentStats();
+    (void)host->sync.give(s_present_done);
+}
+
 static void RecordPresentStats(uint64_t convert_us, uint64_t dma_us,
                                uint32_t dma_submits)
 {
@@ -339,47 +408,31 @@ void Window_DrawFramebuffer(Rect2D r, struct Bitmap *bmp)
     (void)r;
     if (!bmp || !bmp->scan0) return;
 
-    if (s_present_task && s_present_done && s_present_ready && host &&
-        host->sync.take && host->sync.give) {
-        HoloFramebufferPixel *presented = (HoloFramebufferPixel*)bmp->scan0;
-        unsigned next_buffer = s_render_buffer ^ 1u;
-
+    /* The menu fallback owns a single native framebuffer. Wait for any prior
+     * composed frame, then present it synchronously so it cannot be overwritten
+     * while LCD DMA is still reading it. */
+    if (s_present_task && s_present_done && host && host->sync.take && host->sync.give) {
         wait_started = holo_perf_now_us();
         (void)host->sync.take(s_present_done, MODULE_WAIT_FOREVER);
         holo_perf_add(HOLO_PERF_ASYNC_WAIT, holo_perf_now_us() - wait_started);
-        if (s_present_stats_ready) {
-            RecordPresentStats(s_present_convert_us, s_present_dma_us,
-                               s_present_dma_submits);
-            s_present_stats_ready = 0;
-        }
-        s_present_pixels = presented;
-        if (host->sync.give(s_present_ready) == MODULE_OK) {
-            s_render_buffer = next_buffer;
-            bmp->scan0 = (BitmapCol*)s_framebuffers[s_render_buffer];
-            /* A periodic real delay lets IDLE1 service the task watchdog
-             * without charging every newly generated frame a full tick. */
-            if (++s_core1_yield_count >= 8) {
-                s_core1_yield_count = 0;
-                if (host->task.delay) host->task.delay(1);
-            }
-            return;
-        }
-        s_present_pixels = NULL;
+        RecordPendingPresentStats();
+        (void)PresentComposed((HoloFramebufferPixel*)bmp->scan0, CopyNativeBand,
+                              &convert_us, &dma_us, &dma_submits);
+        RecordPresentStats(convert_us, dma_us, dma_submits);
         (void)host->sync.give(s_present_done);
+        return;
     }
 
-    (void)PresentFramebuffer((HoloFramebufferPixel*)bmp->scan0,
-                             &convert_us, &dma_us, &dma_submits);
+    (void)PresentComposed((HoloFramebufferPixel*)bmp->scan0, CopyNativeBand,
+                          &convert_us, &dma_us, &dma_submits);
     RecordPresentStats(convert_us, dma_us, dma_submits);
 }
 
 void Window_FreeFramebuffer(struct Bitmap *bmp)
 {
     Window_HoloShutdownPresent();
-    if (s_framebuffers[0]) Mem_Free(s_framebuffers[0]);
-    if (s_framebuffers[1]) Mem_Free(s_framebuffers[1]);
-    s_framebuffers[0] = NULL;
-    s_framebuffers[1] = NULL;
+    if (s_framebuffer) Mem_Free(s_framebuffer);
+    s_framebuffer = NULL;
     if (bmp) { bmp->scan0 = NULL; bmp->width = bmp->height = 0; }
 }
 
