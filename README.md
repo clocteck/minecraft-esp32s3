@@ -6,7 +6,9 @@
 
 [中文](#中文) · [English](#english) · [演示视频 / Demo Video](https://www.bilibili.com/video/BV1bU4X6eErq) · [ClassiCube](https://github.com/ClassiCube/ClassiCube)
 
-![ClassiCube running on an ESP32-S3 device](docs/images/classicube-esp32s3-device.png)
+<p align="center">
+  <img src="docs/images/classicube-esp32s3-device.png" width="600" alt="ClassiCube running on a clocteck HoloCubic ESP32-S3">
+</p>
 
 > [!NOTE]
 > 本项目基于开源项目 ClassiCube 进行移植和优化，不是 Mojang Studios 的官方 Minecraft 客户端，也不包含官方 Minecraft 音乐。
